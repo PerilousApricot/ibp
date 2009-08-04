@@ -36,7 +36,7 @@ http://www.accre.vanderbilt.edu
 #include <time.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <allocation.h>
+#include "allocation.h"
 
 //#define CAP_SIZE 32
 //#define CAP_BITS CAP_SIZE*6

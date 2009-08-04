@@ -43,7 +43,7 @@ http://www.accre.vanderbilt.edu
 #include "security_log.h"
 #include "dns_cache.h"
 #include "lock_alloc.h"
-#include "config.h"  //This is from ceph
+#include "ceph/config.h"  //This is from ceph
 
 int upgrade_resource_v120(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *dbenv);
 

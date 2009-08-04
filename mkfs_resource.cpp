@@ -30,7 +30,7 @@ http://www.accre.vanderbilt.edu
 #include "allocation.h"
 #include "resource.h"
 #include <stdio.h>
-#include "config.h"
+#include "ceph/config.h"
 
 //***********************************************************************************
 //***********************************************************************************
