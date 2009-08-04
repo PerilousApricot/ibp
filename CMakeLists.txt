@@ -23,6 +23,10 @@ CONFIGURE_FILE( ${CMAKE_SOURCE_DIR}/config.h.cmake ${CMAKE_SOURCE_DIR}/config.h 
 SET(RESOURCE_OBJS resource alloc_history cap_timestamp random osd_fs.cc osd_ebofs.cc db_resource log debug ceph/config.cc ceph/common/Clock.cc )
 SET(NETWORK_OBJS network net_sock net_1_ssl net_2_ssl net_fd net_phoebus phoebus )
 
+# /protobuf stuff
+WRAP_PROTO(PROTO_SRC "messages/alog.proto")
+#ADD_EXECUTABLE(server ${server_SRC} ${PROTO_SRC})
+
 # various executables
 ADD_EXECUTABLE( ibp_server server_lib ibp_server  global_data
 string_token parse_commands install_commands commands
@@ -42,7 +46,8 @@ ADD_EXECUTABLE(get_version get_version log dns_cache string_token ${NETWORK_OBJS
 ADD_EXECUTABLE(get_alloc get_alloc log dns_cache string_token subnet ${NETWORK_OBJS})
 ADD_EXECUTABLE(date_spacefree date_spacefree log dns_cache string_token ${NETWORK_OBJS})
 ADD_EXECUTABLE(expire_list expire_list log dns_cache string_token ${NETWORK_OBJS})
-ADD_EXECUTABLE(print_alog activity_log print_alog log subnet string_token dns_cache)
+ADD_EXECUTABLE(print_alog activity_log print_alog log subnet string_token
+dns_cache ${PROTO_SRC})
 
 SET_TARGET_PROPERTIES(ibp_server PROPERTIES LINKER_LANGUAGE CXX)
 TARGET_LINK_LIBRARIES( ibp_server ${LIBS})
