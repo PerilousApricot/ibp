@@ -36,7 +36,7 @@ http://www.accre.vanderbilt.edu
 #include <netdb.h>
 #include <sys/socket.h>
 
-int lookup_host(char *, char *);
+int lookup_host(const char *, char *);
 void dns_cache_init(int);
 void finalize_dns_cache();
 

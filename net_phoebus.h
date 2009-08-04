@@ -66,10 +66,10 @@ int phoebus_status(net_sock_t *sock);
 int phoebus_close(net_sock_t *sock);
 long int phoebus_write(net_sock_t *sock, const void *buf, size_t count, Net_timeout_t tm);
 long int phoebus_read(net_sock_t *sock, void *buf, size_t count, Net_timeout_t tm);
-int phoebus_connect(net_sock_t *sock, char *hostname, int port, Net_timeout_t timeout);
+int phoebus_connect(net_sock_t *sock, const char *hostname, int port, Net_timeout_t timeout);
 #endif
 
-void ns_config_phoebus(NetStream_t *ns, phoebus_t* path, int tcpsize);
+void ns_config_phoebus(NetStream_t *ns, phoebus_t *path, int tcpsize);
 
 #ifdef __cplusplus
 }

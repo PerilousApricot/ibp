@@ -43,7 +43,7 @@ http://www.accre.vanderbilt.edu
 bool osd_ebofs::id_exists(osd_id_t cid) { return(true); }
 osd_id_t osd_ebofs::create_id() { return(0); }
 int osd_ebofs::remove(osd_id_t cid) { return(-1); }
-int osd_ebofs::truncate(osd_id_t cid) { return(-1); }
+int osd_ebofs::truncate(osd_id_t cid, size_t size) { return(-1); }
 int osd_ebofs::write(osd_id_t cid, off_t offset, size_t len, buffer_t buffer) { return(-1); }
 int osd_ebofs::read(osd_id_t cid, off_t offset, size_t len, buffer_t buffer) { return(-1); }
 size_t osd_ebofs::size(osd_id_t cid) { return(0); };
@@ -167,12 +167,12 @@ int osd_ebofs::remove(osd_id_t cid) {
 //  truncate - truncate the id to 0 bytes
 //**************************************************
 
-int osd_ebofs::truncate(osd_id_t cid) {
+int osd_ebofs::truncate(osd_id_t cid, size_t size) {
    object_t oid(cid, 0);
    pobject_t id(0,0,oid);
 
    elock();
-   int err = fs.truncate(0, id, 0, 0);
+   int err = fs.truncate(0, id, size, 0);
    eunlock();
    
    return(err);

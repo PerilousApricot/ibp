@@ -1,3 +1,40 @@
+v1.2.3p0
+----------------------------------------------------------------------
+Re-tooled the rebuild process. force_resource_rebuild=2 behavior is unchanged.  Although
+  the behavior when 1 is different. When force_resource_rebuild=1 an attempt is made to 
+  recover the DB directly.  If this succeeds the usage is then recaclulated by scanning the DB.
+  This is the default recovery behavior if the depot dies unexpectantly upon restart.
+Duration truncation- IF force_resource_rebuild=1 and truncate_durations=1 then the DB is walked
+  shortening any durations as needed and also removing any expired allocations.
+
+v1.2.2p0
+----------------------------------------------------------------------
+Added background resource cleanup thread. As a result the freeing of all expired allocations
+   that used to occur for status and get_version calls has been dropped.  If extra space is
+   needed in create_allocation_resource() attempts are still made to free the space.
+
+
+v1.2.1p0
+----------------------------------------------------------------------
+IBP_PUSH - Expanded form of IBP_SEND/IBP_PHOEBUS_SEND, which is used for depot-depot copies.
+   The new command provides equivalent functionality to IBP_SEND/IBP_PHOEBUS_SEND but also 
+   adds support for specifying an offset for the destination allocation.  If "-1" is specified
+   it defaults to append the same as the IBP_*SEND commands.
+IBP_PULL - Same functionality as IBP_PUSH but in this case the data is "pulled" or read from
+   the remote depot instead of pushed or written.  The command supports all the functionality 
+   as IBP_PULL: phoebus/normal tranfers, support for data appending or specific destination
+   offset.  IBP_PULL allows for the transfer of data to depot's located behind firewalls,
+   private subnets, or NATed.  A private depot can normally send or push data to a publically
+   available depot but the reverse is normally not true since the private depot is not allowed
+   direct access to the Internet and instead accesses the internet through a proxy or gateway 
+   machine. IBP_PULL gets around this problem by allowing the private depot to initiate the 
+   transfer and pull or read the data from the public depot.
+
+IBP_SPLIT_ALLOCATE - Provides support to atomically split an existing allocation
+   NOTE: THe data is not split just the allocations size/space is changed.
+IBP_MERGE_ALLOCATE - Atomic support to merge the space of 2 existing allocations
+   NOTE: The data in the 2ndary alloc is lost.  Just it's space is merged with the primary.
+
 v1.2.0p0
 ----------------------------------------------------------------------
 ***NOTE: This version is not backward compatible with previous version because 
@@ -11,12 +48,12 @@ Big Changes
 Activity log support - This feature is not complete yet.  Currently it logs each IBP command to an
    activity log file which is appended between subsequent ibp_server restarts.  It does recover from 
    hard kills.  It does NOT currently send full activity logs to a remote log server.  That will be 
-   added in a future version.  The program print_alog processes the compressed activity log files
+   added soon.  The program print_alog processes the compressed activity log files
    generated and prints them to the screen.
 
 Recent activity queries - The allocation_t data structure has been modified which breaks backward 
-   compatibility.  This change keeps the most recent 16 read, write, and manage operations for each
-   allocation.  This includes operations generated through a proxy.  This can be disabled in the 
+   compatibility.  This change keeps the most recent 16 read, 16 write, and 16 manage operations for each
+   allocation.  This includes operations generated through an alias.  This can be disabled in the 
    config file.  There are new IBP commands designed for internal use to access this information
    discussed below.
 
@@ -25,17 +62,17 @@ DB reliability changed to ACID compliant -  This has not been fully tested so be
    ~80 creates/sec/resource.
 
 Initial Security Framework - This is definitely just started and not complete.  The current
-   implementation is focused on 2 aspects creating, using, and managing proxy allocations along
+   implementation is focused on 2 aspects creating, using, and managing alias allocations along
    with controlling IBP command execution. 
 
-   Proxy framework - Think of a proxy allocation as a soft link to the primary allocation that 
-       can also be byte restricted.  The idea is that only proxy allocations are handed out to
+   Alias framework - Think of an alias allocation as a soft link to the primary allocation that 
+       can also be byte restricted.  The idea is that only alias allocations are handed out to
        clients. Since clients never see the true allocation their access can be revoked at any
        time without effecting other users access to the same allocation.  With the exception
        of making allocation changes via IBP_MANAGE the client has no concept they are using
-       a proxy allocation.
+       a alias allocation.
 
-   ibtables control - Each IBP command's execution can be controlled through and iptables-like 
+   iptables-like control - Each IBP command's execution can be controlled through and iptables-like 
        framework.  Namely each ibp command can be restricted via a subnet mask.  This way
        you can restrict IBP_ALLOCATE commands to only come from approved hosts but IBP_READ/WRITE
        commands can come from anywhere.
@@ -62,10 +99,10 @@ IBP_PHOEBUS_SEND - Performs a depot-depot copy using a phoebus network bath inst
     TCP/IP connection.
 IBP_RENAME - Forces the generation of a new set of caps for an existing allocation.  The old caps are no
     longer valid after execution.
-IBP_PROXY_ALLOCATE - Generates a set of caps that act as a proxy for an existing allocation. The proxy can
+IBP_ALIAS_ALLOCATE - Generates a set of caps that act as an alias for an existing allocation. The alias can
     be created using a specific byte range of the existing allocation to restrict access.  The primary
-    allocation is not effected upon deletion of the proxy allocation.
-IBP_PROXY_MANAGE - Similar to IBP_MANAGE but for the proxy allocation.  Requires the primary or master 
+    allocation is not effected upon deletion of the alias allocation.
+IBP_ALIAS_MANAGE - Similar to IBP_MANAGE but for the alias allocation.  Requires the primary or master 
     allocations manage cap to make changes.
 INTERNAL_GET_ALLOC - Used to retreive a raw allocation.
 INTERNAL_DATE_FREE - Used to retreive the free space vs date table

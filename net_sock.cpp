@@ -134,7 +134,7 @@ int sock_connect(net_sock_t *nsock, const char *hostname, int port, Net_timeout_
 
    if (sock == NULL) return(-1);   //** If NULL exit
 
-   return(fd_connect(&(sock->fd), (char *) hostname, port, sock->tcpsize, timeout));
+   return(fd_connect(&(sock->fd), hostname, port, sock->tcpsize, timeout));
 }
 
 //*********************************************************************

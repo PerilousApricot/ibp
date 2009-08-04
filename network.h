@@ -74,6 +74,8 @@ typedef struct timeval Net_timeout_t;
 
 typedef void net_sock_t;
 
+struct ns_monitor_s;   //** Forward declaration
+
 typedef struct {
    int id;                  //ID for tracking purposes
    int cuid;                //Unique ID for the connection.  Changes each time the connection is open/closed
@@ -87,6 +89,7 @@ typedef struct {
    pthread_mutex_t read_lock;    //Read lock
    pthread_mutex_t write_lock;   //Write lock
    char peer_address[128];
+   struct ns_monitor_s *nm;      //THis is only used for an accept call to tell which bind was accepted
    int (*close)(net_sock_t *sock);  //** Close socket
    long int(*write)(net_sock_t *sock, const void *buf, size_t count, Net_timeout_t tm);
    long int (*read)(net_sock_t *sock, void *buf, size_t count, Net_timeout_t tm);
@@ -99,7 +102,7 @@ typedef struct {
    int (*connection_request)(net_sock_t *sock, int timeout);
 } NetStream_t;
 
-typedef struct {   //** Struct used to handle ports being monitored
+typedef struct ns_monitor_s {   //** Struct used to handle ports being monitored
    NetStream_t *ns;       //** Connection actually being monitored
    char *address;         //** Interface to bind to
    int port;              //** Port to use
@@ -117,12 +120,17 @@ typedef struct {
    int trigger;             //Trigger used to wake up the network
    int accept_pending;      //New connection is pending
    int used_ports;          //Number of monitor ports used
+   int monitor_index;       //Last ns checked in accept polling
    ns_monitor_t nm[NETWORK_MON_MAX];  //List of ports being monitored
    pthread_mutex_t ns_lock; //Lock for serializing ns modifications
    pthread_cond_t cond;   //** cond used for blocking pending accept
 } Network_t;
 
 #define ns_getid(ns) ns->id
+#define ns_get_monitor(ns) ns->nm
+#define nm_get_port(nm) nm->port
+#define nm_get_host(nm) nm->address
+
 void set_network_tcpsize(int tcpsize);
 int get_network_tcpsize(int tcpsize);
 int ns_merge_ssl(NetStream_t *ns1, NetStream_t *ns2);

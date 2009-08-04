@@ -54,7 +54,7 @@ int sock_status(net_sock_t *sock);
 int sock_close(net_sock_t *sock);
 long int sock_write(net_sock_t *sock, const void *buf, size_t count, Net_timeout_t tm);
 long int sock_read(net_sock_t *sock, void *buf, size_t count, Net_timeout_t tm);
-int sock_connect(net_sock_t *sock, char *hostname, int port, Net_timeout_t timeout);
+int sock_connect(net_sock_t *sock, const char *hostname, int port, Net_timeout_t timeout);
 int sock_connection_request(net_sock_t *nsock, int timeout);
 net_sock_t *sock_accept(net_sock_t *nsock);
 int sock_bind(net_sock_t *nsock, char *address, int port);

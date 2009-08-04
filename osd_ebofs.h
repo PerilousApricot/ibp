@@ -88,7 +88,7 @@ public:
     osd_id_t create_id();            // Returns an OSD object.  Think of it as a filename
     int reserve(osd_id_t id, size_t len) { return(0); };
     int remove(osd_id_t id);         // Remove the object
-    int truncate(osd_id_t id);       // truncate the object
+    int truncate(osd_id_t id, size_t size);       // truncate the object
     size_t size(osd_id_t);           // Return the size of the object 
     int read(osd_id_t id, off_t offset, size_t len, buffer_t buffer);   //Read data
     int write(osd_id_t id, off_t offset, size_t len, buffer_t buffer);  //Store data to disk

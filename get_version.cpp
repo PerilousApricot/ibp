@@ -31,15 +31,18 @@ int main(int argc, char **argv)
 
 
   if (argc < 3) {
-     printf("get_version host port\n");
+     printf("get_version host port [timeout]\n");
      return(0);
   }
 
+  char cmd[512];
   char *host = argv[1];
   int port = atoi(argv[2]);
-  char *cmd = argv[3];
+  int timeout = 15;
 
-  cmd = "1 4 5 10\n";  // IBP_ST_VERSION command
+  if (argc == 4) timeout = atoi(argv[3]);
+
+  sprintf(cmd, "1 4 5 %d\n", timeout);  // IBP_ST_VERSION command
 
   dns_cache_init(10);
 

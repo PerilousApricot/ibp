@@ -67,6 +67,36 @@ int get_command_timeout(ibp_task_t *task, char **bstate)
 }
 
 //*****************************************************************
+// parse_key - Splits the key into RID and cap. Format is RID#key
+//*****************************************************************
+
+int parse_key(char **bstate, Cap_t *cap, RID_t *rid, char *crid, int ncrid)
+{
+  int finished;
+  char *tmp = string_token(NULL, "#", bstate, &finished);
+
+  if (crid != NULL) {  //** Store the character version if requested
+     crid[ncrid-1] = '\0';
+     strncpy(crid, tmp, ncrid-1);
+  }
+  
+  //** Check the validity of the RID
+  if (str2rid(tmp, rid) != 0) {
+    log_printf(5, "parse_key: Bad RID: %s\n", tmp);
+    return(-1);
+  }
+
+  //** Lastly Get the key
+  cap->v[sizeof(Cap_t)-1] = '\0';
+  strncpy(cap->v, string_token(NULL, " ", bstate, &finished), sizeof(Cap_t)-1);
+  log_printf(10, "parse_key: cap=%s\n", cap->v);
+  log_printf(10, "parse_key: RID=%s\n", tmp);
+
+  return(0);
+}
+
+
+//*****************************************************************
 // read_allocate - Reads an allocate command
 //
 // 1.3:
@@ -75,6 +105,9 @@ int get_command_timeout(ibp_task_t *task, char **bstate)
 // 1.4:
 //    version IBP_ALLOCATE RID IBP_SOFT|IBP_HARD TYPE DURATION SIZE TIMEOUT \n
 //      %d         %d      %llu         %d         %d     %ll   %llu  %d
+//
+//    version IBP_SPLIT_ALLOCATE mkey mtypekey IBP_SOFT|IBP_HARD TYPE DURATION SIZE TIMEOUT\n
+//      %d           %d           %s     %s            %d         %d     %ll   %llu   %d
 //
 //  TYPE: IBP_BYTEARRAY | IBP_BUFFER | IBP_FIFO | IBP_CIRQ
 //*****************************************************************
@@ -94,16 +127,25 @@ int read_allocate(ibp_task_t *task, char **bstate)
    RID_t *rid = &(cmd->cargs.allocate.rid);
 
    //** Parse the RID ***
-   if (cmd->version > IBPv031) {   
-      char *tmp = string_token(NULL, " ", bstate, &fin);
-      log_printf(15, "read_allocate:  cmd(rid)=%s\n", tmp);
-      if (str2rid(tmp, rid) != 0) {
-         log_printf(1, "read_allocate: Bad RID: %s\n", tmp);
-         send_cmd_result(task, IBP_E_INVALID_RID);
-         return(-1);
+   if (cmd->version > IBPv031) {
+      if (cmd->command != IBP_SPLIT_ALLOCATE) {
+         char *tmp = string_token(NULL, " ", bstate, &fin);
+         log_printf(15, "read_allocate:  cmd(rid)=%s\n", tmp);
+         if (str2rid(tmp, rid) != 0) {
+            log_printf(10, "read_allocate: Bad RID: %s\n", tmp);
+            send_cmd_result(task, IBP_E_INVALID_RID);
+            return(-1);
+         }
+      } else {  //** IBP_SPLIT_ALLOCATE
+        if (parse_key(bstate, &(cmd->cargs.allocate.master_cap), rid, NULL, 0) != 0) {
+            log_printf(10, "read_allocate: Bad RID/mcap!\n");
+            send_cmd_result(task, IBP_E_INVALID_RID);
+            return(-1);
+        }
+        string_token(NULL, " ", bstate, &fin);  //** Drop the WRMkey
       }
    } else {
-      empty_rid(rid);   //** Don't care which resource we use
+     empty_rid(rid);   //** Don't care which resource we use
    }
 
    char dummy[128];
@@ -164,6 +206,56 @@ int read_allocate(ibp_task_t *task, char **bstate)
 
    debug_printf(1, "read_allocate: Successfully parsed allocate command\n");
    return(0);
+}
+
+//*****************************************************************
+// read_merge_allocate - Merges 2 allocations if possible. The child
+//    allocation is removed if successful.
+//
+// v1.4
+//    version IBP_MERGE_ALLOCATE mkey mtypekey ckey ctypekey TIMEOUT\n
+//      %d           %d           %s     %s     %s     %s       %d
+//
+//*****************************************************************
+
+int read_merge_allocate(ibp_task_t *task, char **bstate)
+{
+   int fin;
+   Cmd_state_t *cmd = &(task->cmd);
+   Cmd_merge_t *op = &(cmd->cargs.merge);
+   RID_t child_rid;
+
+   fin = 0;
+
+   debug_printf(1, "read_merge_allocate:  Starting to process buffer\n");
+
+   //** Parse the master key  
+   if (parse_key(bstate, &(op->mkey), &(op->rid), op->crid, sizeof(op->crid)) != 0) {
+       log_printf(10, "read_merge_allocate: Bad RID/mcap!\n");
+       send_cmd_result(task, IBP_E_INVALID_RID);
+       return(-1);
+   }
+   string_token(NULL, " ", bstate, &fin);  //** Drop the WRMkey
+
+   //** Parse the child key  
+   if (parse_key(bstate, &(op->ckey), &child_rid, NULL, 0) != 0) {
+       log_printf(10, "read_merge_allocate: Child RID/mcap!\n");
+       send_cmd_result(task, IBP_E_INVALID_RID);
+       return(-1);
+   }
+   string_token(NULL, " ", bstate, &fin);  //** Drop the WRMkey
+
+   //** Now compare the rid's to make sure they are the same
+   if (compare_rid(&(op->rid), &child_rid) != 0) {
+       log_printf(10, "read_merge_allocate: Child/Master RID!\n");
+       send_cmd_result(task, IBP_E_INVALID_RID);
+       return(-1);
+   }
+
+   get_command_timeout(task, bstate);
+
+   debug_printf(1, "read_merge_allocate: Successfully parsed allocate command\n");
+   return(0);   
 }
 
 
@@ -334,11 +426,11 @@ return(-1);
 //    version IBP_MANAGE key typekey IBP_CHNG|IBP_PROBE captype maxSize life reliability timeout \n
 //
 // 1.5
-//    version IBP_PROXY_MANAGE key typekey IBP_INCR|IBP_DECR captype mkey mtypekey timeout \n
+//    version IBP_ALIAS_MANAGE key typekey IBP_INCR|IBP_DECR captype mkey mtypekey timeout \n
 // 
-//    version IBP_PROXY_MANAGE key typekey IBP_CHNG offset len duration mkey mtypekey timeout \n
+//    version IBP_ALIAS_MANAGE key typekey IBP_CHNG offset len duration mkey mtypekey timeout \n
 //
-//    version IBP_PROXY_MANAGE key typekey IBP_PROBE timeout \n
+//    version IBP_ALIAS_MANAGE key typekey IBP_PROBE timeout \n
 //
 //*****************************************************************
 
@@ -397,8 +489,8 @@ int read_manage(ibp_task_t *task, char **bstate)
    switch(manage->subcmd) {
       case IBP_INCR:
       case IBP_DECR:
-         if (cmd->command == IBP_PROXY_MANAGE) {  //** Get the "master" key if this is a proxy command
-            string_token(NULL, "#", bstate, &finished);   //** Strip the RID.  We only keep it for the proxy
+         if (cmd->command == IBP_ALIAS_MANAGE) {  //** Get the "master" key if this is a alias command
+            string_token(NULL, "#", bstate, &finished);   //** Strip the RID.  We only keep it for the alias
 
             //** Get the master key
             manage->master_cap.v[sizeof(manage->master_cap.v)-1] = '\0';
@@ -420,7 +512,7 @@ int read_manage(ibp_task_t *task, char **bstate)
            get_command_timeout(task, bstate);
            return(0);
       case IBP_CHNG:
-         if (cmd->command == IBP_PROXY_MANAGE) { //** Get the new offset
+         if (cmd->command == IBP_ALIAS_MANAGE) { //** Get the new offset
             llu = 0; sscanf(string_token(NULL, " ", bstate, &finished), "%llu", &llu);
             manage->offset = llu;
          }
@@ -464,8 +556,8 @@ int read_manage(ibp_task_t *task, char **bstate)
             }
          }
 
-         if (cmd->command == IBP_PROXY_MANAGE) {  //** Get the "master" key if this is a proxy command
-            string_token(NULL, "#", bstate, &finished);   //** Strip the RID.  We only keep it for the proxy
+         if (cmd->command == IBP_ALIAS_MANAGE) {  //** Get the "master" key if this is a alias command
+            string_token(NULL, "#", bstate, &finished);   //** Strip the RID.  We only keep it for the alias
 
             //** Get the master key
             manage->master_cap.v[sizeof(manage->master_cap.v)-1] = '\0';
@@ -528,31 +620,31 @@ int read_rename(ibp_task_t *task, char **bstate)
 }
 
 //*****************************************************************
-//  read_proxy_allocate - Reads an ibp_proxy_allocate command
+//  read_alias_allocate - Reads an ibp_alias_allocate command
 //
 // 1.5
-//    version IBP_PROXY_ALLOCATE key typekey offset len duration timeout\n
+//    version IBP_ALIAS_ALLOCATE key typekey offset len duration timeout\n
 //
 //   if offset=len=0 then can use entire alocation
 //   if duration=0 then use master allocations expiration
 //*****************************************************************
 
-int read_proxy_allocate(ibp_task_t *task, char **bstate)
+int read_alias_allocate(ibp_task_t *task, char **bstate)
 {
    int finished;
    uint64_t lu;
 
-   Cmd_proxy_alloc_t *cmd = &(task->cmd.cargs.proxy_alloc);
+   Cmd_alias_alloc_t *cmd = &(task->cmd.cargs.alias_alloc);
 
    finished = 0;
 
-   debug_printf(1, "read_proxy_allocate:  Starting to process buffer\n");
+   debug_printf(1, "read_alias_allocate:  Starting to process buffer\n");
 
    //** Get the RID and key the format is RID#key
    cmd->crid[sizeof(cmd->crid)-1] = '\0';
    strncpy(cmd->crid, string_token(NULL, "#", bstate, &finished), sizeof(cmd->crid)-1);
    if (str2rid(cmd->crid, &(cmd->rid)) != 0) {
-      log_printf(5, "read_proxy_allocate: Bad RID: %s\n", cmd->crid);
+      log_printf(5, "read_alias_allocate: Bad RID: %s\n", cmd->crid);
       send_cmd_result(task, IBP_E_INVALID_RID);                
       return(-1);
    }
@@ -560,35 +652,35 @@ int read_proxy_allocate(ibp_task_t *task, char **bstate)
    //** Get the key
    cmd->cap.v[sizeof(cmd->cap.v)-1] = '\0';
    strncpy(cmd->cap.v, string_token(NULL, " ", bstate, &finished), sizeof(cmd->cap.v)-1);
-   log_printf(10, "read_proxy_allocate: cap=%s\n", cmd->cap.v);
+   log_printf(10, "read_alias_allocate: cap=%s\n", cmd->cap.v);
 
-   log_printf(10, "read_proxy_allocate: RID=%s\n", cmd->crid);
+   log_printf(10, "read_alias_allocate: RID=%s\n", cmd->crid);
    string_token(NULL, " ", bstate, &finished);  //** Drop the WRMkey
 
    cmd->offset = cmd->len = cmd->expiration == 0;
    
    //** Get the offset **
    if (sscanf(string_token(NULL, " ", bstate, &finished), LU, &(cmd->offset)) != 1) { 
-      log_printf(5, "read_proxy_allocate: Bad offset cap= %s\n", cmd->crid);
+      log_printf(5, "read_alias_allocate: Bad offset cap= %s\n", cmd->crid);
       send_cmd_result(task, IBP_E_INVALID_PARAMETER);                
       return(-1);
    }
 
    //** Get the len **
    if (sscanf(string_token(NULL, " ", bstate, &finished), LU, &(cmd->len)) != 1) { 
-      log_printf(5, "read_proxy_allocate: Bad length cap= %s\n", cmd->crid);
+      log_printf(5, "read_alias_allocate: Bad length cap= %s\n", cmd->crid);
       send_cmd_result(task, IBP_E_INVALID_PARAMETER);                
       return(-1);
    }
 
    //** Get the duration **
    if (sscanf(string_token(NULL, " ", bstate, &finished), LU, &lu) != 1) { 
-      log_printf(5, "read_proxy_allocate: Bad duration cap= %s\n", cmd->crid);
+      log_printf(5, "read_alias_allocate: Bad duration cap= %s\n", cmd->crid);
       send_cmd_result(task, IBP_E_INVALID_PARAMETER);                
       return(-1);
    }
    cmd->expiration = 0;
-//   log_printf(15, "read_proxy_allocate: cmp->expire=%lu\n", lu); 
+//   log_printf(15, "read_alias_allocate: cmp->expire=%lu\n", lu); 
    if (lu != 0) cmd->expiration = lu + time(NULL);
   
    get_command_timeout(task, bstate);
@@ -677,27 +769,68 @@ int read_write(ibp_task_t *task, char **bstate)
 // IBP_PHOEBUS_SEND
 //    version IBP_PHOEBUS_SEND phoebus_path|auto key typekey remote_wcap offset length src_timeout dest_timeout dest_ClientTimeout\n
 //
+// IBP_PUSH|IBP_PULL
+//    version IBP_PUSH|IBP_PULL ctype key typekey remote_wcap local_offset remote_offset length src_timeout dest_timeout\n
+//
+//    
+//    ctype - Connection type:
+//         IBP_TCP - Normal transfer mode
+//         IBP_PHOEBUS phoebus_path|auto - USe phoebus transfer
 //    phoebus_path - Comma separated List of phoebus hosts/ports, eg gateway1/1234,gateway2/4321
-//        Use 'auto' to use the default phoebus path          
+//        Use 'auto' to use the default phoebus path
+//    *_offset - If -1 this is an append operation.  This is only valid for the following combinations:
+//        IBP_PUSH - remote_offset and IBP_PULL - local_offset
 //*****************************************************************
 
 int read_read(ibp_task_t *task, char **bstate)
 {
-   int finished;
+   int finished, ctype, get_remote_cap;
    char *path;
    unsigned long int lu;
-   unsigned long long int llu;
+   long long int ll;
+   long long unsigned int llu;
    Cmd_state_t *cmd = &(task->cmd);
    Cmd_read_t *r = &(cmd->cargs.read);
 
+   memset(r, 0, sizeof(Cmd_read_t));
    finished = 0;
 
    debug_printf(1, "read_read:  Starting to process buffer\n");
 
    r->tq = NULL;
    r->recving = 0;  //** Flag the command as not recving data so the handle will load the res, etc.
+  
+   r->write_mode = 1;  //** Default is to append
+   r->transfer_dir = IBP_PUSH;
+   
+   ctype = IBP_TCP; r->path[0] = '\0';
+   get_remote_cap = 0;
+   switch (cmd->command) {
+       case IBP_PULL:
+          r->transfer_dir = IBP_PULL;
+       case IBP_PUSH:
+          get_remote_cap = 1;
+          ctype = IBP_TCP; sscanf(string_token(NULL, " ", bstate, &finished), "%d", &ctype);
+          if ((ctype != IBP_TCP) && (ctype != IBP_PHOEBUS)) {
+             log_printf(10, "read_read:  Invalid ctype(%d)!\n", ctype);
+             send_cmd_result(task, IBP_E_TYPE_NOT_SUPPORTED);
+             return(-1);
+          } 
+          break;
+       case IBP_PHOEBUS_SEND: 
+          r->transfer_dir = IBP_PUSH;
+          get_remote_cap = 1;
+          ctype = IBP_PHOEBUS; 
+          break;
+       case IBP_SEND: 
+          r->transfer_dir = IBP_PUSH;
+          get_remote_cap = 1;
+          break;
+   }
 
-   if (cmd->command == IBP_PHOEBUS_SEND) { //** Get the phoebus path
+   r->ctype = ctype;
+  
+   if (ctype == IBP_PHOEBUS) { //** Get the phoebus path
       r->path[sizeof(r->path)-1] = '\0';
       path = string_token(NULL, " ", bstate, &finished);
       if (strcmp(path, "auto") == 0) path="\0";
@@ -705,7 +838,7 @@ int read_read(ibp_task_t *task, char **bstate)
       debug_printf(10, "read_read: phoebus_path=%s\n", r->path);      
    }
 
-   //** Get the RID, uh I mean the key...... the format is RID#key
+   //** Get the RID and key...... the format is RID#key
    char *tmp;
    tmp = string_token(NULL, "#", bstate, &finished);
    if (str2rid(tmp, &(r->rid)) != 0) {
@@ -720,23 +853,39 @@ int read_read(ibp_task_t *task, char **bstate)
    strncpy(r->cap.v, string_token(NULL, " ", bstate, &finished), sizeof(r->cap.v)-1);
    debug_printf(10, "read_read: cap=%s\n", r->cap.v);
 
-   if ((cmd->command == IBP_SEND) || (cmd->command == IBP_PHOEBUS_SEND)) {  //** For send commands get the remote cap
+   if (get_remote_cap == 1) {  //** For send/push/pull commands get the remote cap
       task->child = NULL;
-      r->remote_wcap[sizeof(r->remote_wcap)-1] = '\0';
-      strncpy(r->remote_wcap, string_token(NULL, " ", bstate, &finished), sizeof(r->remote_wcap)-1);
-      debug_printf(10, "read_read: remote_wcap=%s\n", r->remote_wcap);
+      r->remote_cap[sizeof(r->remote_cap)-1] = '\0';
+      strncpy(r->remote_cap, string_token(NULL, " ", bstate, &finished), sizeof(r->remote_cap)-1);
+      debug_printf(10, "read_read: remote_cap=%s\n", r->remote_cap);
    }
 
    debug_printf(10, "read_read: RID=%s\n", r->crid);
    string_token(NULL, " ", bstate, &finished);  //** Drop the WRMkey
 
    //** Get the offset
-   llu = 0; sscanf(string_token(NULL, " ", bstate, &finished), "%llu", &llu);
-   r->offset = llu;
-   if (llu < 0) {
-      log_printf(10, "read_read:  Invalid offset (%llu)!\n", llu);
-      send_cmd_result(task, IBP_E_FILE_SEEK_ERROR);
-      return(-1);
+   ll = 0; sscanf(string_token(NULL, " ", bstate, &finished), "%lld", &ll);
+   r->offset = ll;
+   if (cmd->command == IBP_PULL) {            
+      if (ll > -1) {     //** PULL allows the 1st cap to be append
+        r->write_mode = 0;
+      } else {
+         r->offset = 0;
+      }
+   }
+
+   //** Get the remote offset if needed
+   if ((cmd->command == IBP_PUSH) || (cmd->command == IBP_PULL)) {
+      ll = 0; sscanf(string_token(NULL, " ", bstate, &finished), "%lld", &ll);
+      r->remote_offset = 0;
+      if (cmd->command == IBP_PUSH) {
+         if (ll > -1) {
+            r->write_mode = 0;
+            r->remote_offset = ll;
+         }
+      } else if (ll > -1){
+         r->remote_offset = ll;
+      }
    }
 
    //** Get the length

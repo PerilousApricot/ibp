@@ -27,46 +27,49 @@ Nashville, TN 37203
 http://www.accre.vanderbilt.edu
 */ 
 
-//******************************************************************
-//******************************************************************
+#ifndef __ENVELOPE_H_
+#define __ENVELOPE_H_
 
-#ifndef _IBP_ALLOCATION_V116_H_
-#define _IBP_ALLOCATION_V116_H_
-
-#include <time.h>
-#include <stdio.h>
 #include <stdint.h>
-#include <allocation.h>
+#include <stdio.h>
 
-//#define CAP_SIZE 32
-//#define CAP_BITS CAP_SIZE*6
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-//#define READ_CAP   0
-//#define WRITE_CAP  1
-//#define MANAGE_CAP 2
+#define ENVELOPE_SIZE 8
 
-//#define ALLOC_HEADER 4096
+typedef struct {
+  union {
+    unsigned char byte[4];
+    uint32_t n;
+  };
+} env_command_t;
 
-//#define ALLOC_HARD 0
-//#define ALLOC_SOFT 1
+typedef struct {
+  env_command_t cmd;
+  uint32_t size;
+} envelope_t;
 
-//typedef struct {
-//    char v[CAP_SIZE+1];
-//} Cap_t;
+void envelope_clear(envelope_t *env);
+int envelope_parse(envelope_t *env, const unsigned char *buffer);
+void envelope_encode(const envelope_t *env, unsigned char *buffer);
+uint32_t envelope_get_size(envelope_t *env);
+void envelope_set_size(envelope_t *env, uint32_t size);
+env_command_t envelope_get_command(envelope_t *env);
+void envelope_set_command(envelope_t *env, const env_command_t cmd);
+void envelope_set(envelope_t *env, const env_command_t cmd, uint32_t size);
+void envelope_get(envelope_t *env, env_command_t *cmd, uint32_t *size);
+void set_env_command(env_command_t *cmd, int b0, int b1, int b2, int b3);
+void set_env_command_uint32(env_command_t *cmd, uint32_t n);
+uint32_t get_env_command_uint32(env_command_t *cmd);
+int env_cmd_within_subnet(env_command_t *cmd, env_command_t *cmd_net, int bits);
+int env_cmd_compare(env_command_t *cmd1, env_command_t *cmd2);
 
-typedef struct {    // IBP Allocation
-  uint32_t   expiration;
-  osd_id_t id;
-  uint64_t size;
-  uint64_t max_size;
-  uint64_t r_pos;
-  uint64_t w_pos;
-  int32_t  type; /* BYTE_ARRAY, QUEUE, etc */
-  int32_t  reliability; /* SOFT/HARD */
-  int32_t  read_refcount;
-  int32_t  write_refcount;
-  Cap_t    caps[3];
-} Allocation_v116_t;
+#ifdef __cplusplus
+}
+#endif
 
 #endif
+
 

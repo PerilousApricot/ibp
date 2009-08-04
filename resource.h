@@ -67,18 +67,23 @@ typedef struct {       //Resource structure
    int  enable_read_history;  //USed to enable tracking of the various history lists
    int  enable_write_history;
    int  enable_manage_history;
+   int  enable_alias_history;
    Rsize_t max_size[3];     //Soft and Hard limits
    Rsize_t minfree;         //Minimum amount of free space in KB
    Rsize_t used_space[2];   //Soft/Hard data used
    Rsize_t pending;         //Pending creates
-   Rsize_t n_allocs;        //Total number of allocations (physical and proxy)
-   Rsize_t n_proxy;         //Number of proxy allocations
+   Rsize_t n_allocs;        //Total number of allocations (physical and alias)
+   Rsize_t n_alias;         //Number of alias allocations
    int    preallocate;     //PReallocate all new allocations
    DB_resource_t db;       //DB for maintaining the resource's caps
 //   Ebofs    *edev;         //Raw EBOFS device if used
    osd_abstract *fs;        //Actual filesystem   
    int      rl_index;       //** Index in global resource array
    pthread_mutex_t mutex;  //Lock for creates
+   int             cleanup_shutdown; 
+   pthread_mutex_t cleanup_lock;  //Used to shutdown cleanup thread
+   pthread_cond_t  cleanup_cond;  //Used to shutdown the cleanup thread
+   pthread_t       cleanup_thread;
 } Resource_t;
 
 typedef struct {
@@ -95,6 +100,7 @@ char *rid2str(RID_t *rid, char *name, int n_size);
 int str2rid(const char *name, RID_t *rid);
 void empty_rid(RID_t *rid);
 int is_empty_rid(RID_t *rid);
+int compare_rid(RID_t *rid1, RID_t *rid2);
 
 int mkfs_resource(RID_t rid, char *dev_type, char *device_name, char *db_location);
 int mount_resource(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *env, int force_rebuild, 
@@ -104,9 +110,13 @@ int print_resource(Resource_t *res, FILE *fd);
 int print_resource_usage(Resource_t *r, FILE *fd);
 int remove_allocation_resource(Resource_t *r, Allocation_t *alloc);
 void free_expired_allocations(Resource_t *r);
+uint64_t resource_allocable(Resource_t *r, int free_space);
 int create_allocation_resource(Resource_t *r, Allocation_t *a, size_t size, int type, 
-    int reliability, time_t length, int is_proxy, int preallocate_space);
+    int reliability, time_t length, int is_alias, int preallocate_space);
+int split_allocation_resource(Resource_t *r, Allocation_t *ma, Allocation_t *a, size_t size, int type,
+    int reliability, time_t length, int is_alias, int preallocate_space);
 int rename_allocation_resource(Resource_t *r, Allocation_t *a);
+int merge_allocation_resource(Resource_t *r, Allocation_t *ma, Allocation_t *a);
 int get_allocation_by_cap_resource(Resource_t *r, int cap_type, Cap_t *cap, Allocation_t *a);
 int get_allocation_resource(Resource_t *r, osd_id_t id, Allocation_t *a);
 int modify_allocation_resource(Resource_t *r, osd_id_t id, Allocation_t *a);
@@ -122,6 +132,7 @@ walk_expire_iterator_t *walk_expire_iterator_begin(Resource_t *r);
 void walk_expire_iterator_end(walk_expire_iterator_t *wei);
 int set_walk_expire_iterator(walk_expire_iterator_t *wei, time_t t);
 int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Allocation_t *a);
+void launch_resource_cleanup_thread(Resource_t *r);
 
 int create_history_table(Resource_t *r);
 int mount_history_table(Resource_t *r);
@@ -129,9 +140,9 @@ void umount_history_table(Resource_t *r);
 int get_history_table(Resource_t *r, osd_id_t id, Allocation_history_t *h);
 int put_history_table(Resource_t *r, osd_id_t id, Allocation_history_t *h);
 int blank_history(Resource_t *r, osd_id_t id);
-void update_read_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid);
-void update_write_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid);
-void update_manage_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, int cmd, int subcmd, int reliability, uint32_t expiration, uint64_t size, osd_id_t pid);
+void update_read_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid);
+void update_write_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid);
+void update_manage_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, int cmd, int subcmd, int reliability, uint32_t expiration, uint64_t size, osd_id_t pid);
 
 #endif
 

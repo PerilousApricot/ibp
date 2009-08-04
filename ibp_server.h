@@ -57,6 +57,11 @@ http://www.accre.vanderbilt.edu
 //*** Internal constant to represent the key is the osd_id
 #define INTERNAL_ID 4  
 
+typedef struct {  //** bind ports
+  char *hostname;
+  int port;
+} interface_t;
+
 typedef struct {    //*** forms the fn table for a depot command
    int command;                             //** Command value
    int used;                                //** Determines if the command is used
@@ -74,8 +79,10 @@ typedef struct {    //*** forms the fn table for a depot command
 #define COMMAND_TABLE_MAX 100   //** Size of static command table
 
 typedef struct {       // Structure containg the overall server config
-   char *hostname;       //Hostname to bind to
-   int port;             //Port to listen on
+   interface_t *iface;   //Interfaces listening on
+   int n_iface;          //Number of bound interfaces
+//   char *hostname;       //Hostname to bind to
+//   int port;             //Port to listen on
    int max_threads;      //Max number of threads for pool
    int max_pending;      //Max pending connections
    int timestamp_interval;  //Log timestamp interval in sec
@@ -93,6 +100,9 @@ typedef struct {       // Structure containg the overall server config
    const char *debugfile;      //Debug output file (default stdout)
    int   alog_max_size;      //Max size for the activity log
    const char *alog_name;      //Activity file (default ibp_activity.log)
+   const char *alog_host;      //** Host to send alog info
+   int   alog_max_history;     //** How many alog files to keep before dropping them
+   int   alog_port;            //** alog host's port to use
    const char *password;        //Depot Password for status change commands
    char **default_acl;     //Default command ACLs
 } Server_t;
@@ -171,7 +181,8 @@ void signal_taskmgr();
 //*** Functions in parse_commands.c ***
 int read_rename(ibp_task_t *task, char **bstate);
 int read_allocate(ibp_task_t *task, char **bstate);
-int read_proxy_allocate(ibp_task_t *task, char **bstate);
+int read_merge_allocate(ibp_task_t *task, char **bstate);
+int read_alias_allocate(ibp_task_t *task, char **bstate);
 int read_status(ibp_task_t *task, char **bstate);
 int read_manage(ibp_task_t *task, char **bstate);
 int read_write(ibp_task_t *task, char **bstate);
@@ -182,21 +193,22 @@ int read_internal_expire_list(ibp_task_t *task, char **bstate);
 
 //*** Functions in handle_commands.c ***
 int handle_allocate(ibp_task_t *task);
-int handle_proxy_allocate(ibp_task_t *task);
+int handle_merge(ibp_task_t *task);
+int handle_alias_allocate(ibp_task_t *task);
 int handle_rename(ibp_task_t *task);
 int handle_status(ibp_task_t *task);
 int handle_manage(ibp_task_t *task);
 int handle_write(ibp_task_t *task);
 int handle_read(ibp_task_t *task);
 int handle_copy(ibp_task_t *task);
-int handle_send(ibp_task_t *task, osd_id_t rpid, NetStream_t *ns, const char *key, const char *typekey);
+int handle_transfer(ibp_task_t *task, osd_id_t rpid, NetStream_t *ns, const char *key, const char *typekey);
 int handle_internal_get_alloc(ibp_task_t *task);
 int handle_internal_date_free(ibp_task_t *task);
 int handle_internal_expire_list(ibp_task_t *task);
 
 //*** Functions in buffer_transfer.c ***
-int read_from_disk(ibp_task_t *task, Allocation_t *a);
-int write_to_disk(ibp_task_t *task, Allocation_t *a);
+int read_from_disk(ibp_task_t *task, Allocation_t *a, off_t *left, Resource_t *res);
+int write_to_disk(ibp_task_t *task, Allocation_t *a, off_t *left, Resource_t *res);
 void stream_transfer(ibp_task_t *rtask, ibp_task_t *wtask, Allocation_t *a, int *r_status, int *w_status);
 int single_buffer_transfer(ibp_task_t *mytask, Task_que_t *tq);
 

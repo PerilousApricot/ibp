@@ -54,11 +54,11 @@ http://www.accre.vanderbilt.edu
 #include "net_phoebus.h"
 #include "net_fd.h"
 #include "phoebus.h"
-#include "config.h"
+
 #ifndef _ENABLE_PHOEBUS    //** Phoebus stub goes below
-void ns_config_phoebus(NetStream_t *ns, phoebus_t *path, int tcpsize )
+void ns_config_phoebus(NetStream_t *ns, phoebus_t *path, int tcpsize)
 {
-  ns_config_sock(ns,0,0);
+  ns_config_sock(ns,0,tcpsize);
 }
 
 #else //*** All the phoebus code.  IF not enables only ns_phoebus_config is defined
@@ -149,7 +149,7 @@ long int phoebus_read(net_sock_t *nsock, void *buf, size_t count, Net_timeout_t 
 // phoebus_connect - Creates a connection to a remote host
 //*********************************************************************
 
-int phoebus_connect(net_sock_t *nsock, char *hostname, int port, Net_timeout_t timeout)
+int phoebus_connect(net_sock_t *nsock, const char *hostname, int port, Net_timeout_t timeout)
 {
    network_phoebus_t *sock = (network_phoebus_t *)nsock;
 

@@ -14,6 +14,7 @@
 #include "ibp_ClientLib.h"
 #include "ibp_server.h"
 #include "network.h"
+#include "net_sock.h"
 #include "log.h"
 #include "dns_cache.h"
 #include "fmttypes.h"
@@ -39,7 +40,7 @@ void parse_line(char *buffer, time_t *t, uint64_t *a_count, uint64_t *p_count, u
 //*************************************************************************
 //*************************************************************************
 
-int main(int argc, const char **argv)
+int main(int argc, char **argv)
 {
   int bufsize = 1024*1024;
   char buffer[bufsize], *bstate;
@@ -67,15 +68,17 @@ int main(int argc, const char **argv)
   i = 1;
   if (strcmp(argv[i], "-full") == 0) { print_full = 1; i++; }
 
-  const char *host = argv[i]; i++;
+  char *host = argv[i]; i++;
   int port = atoi(argv[i]); i++;
-  const char *rid = argv[i]; i++;
+  char *rid = argv[i]; i++;
   sscanf(argv[i], "%lf", &fb1);
   size = fb1 * base_unit;
 
   dns_cache_init(10);
 
   NetStream_t *ns = new_netstream();
+  ns_config_sock(ns, -1, 0);
+
   set_net_timeout(&dt, 5, 0);
 
   err = net_connect(ns, host, port, dt);
@@ -101,7 +104,7 @@ int main(int argc, const char **argv)
   total_bytes_used = total_bytes = 0;
 
   if (print_full) {
-     printf("Time date Tallocs Tproxy Ttotal mb_used mb_max Nallocs Nproxy Ntotal total_used_mb  total_max_mb\n");
+     printf("Time date Tallocs Talias Ttotal mb_used mb_max Nallocs Nalias Ntotal total_used_mb  total_max_mb\n");
   } else {
      printf("Time date Ttotal mb_max Ntotal total_max_mb\n");
   }

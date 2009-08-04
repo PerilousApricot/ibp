@@ -88,7 +88,7 @@ int gethostbyname2_r (const char *name, int af,
 //      are used to make it threadsafe!
 //**************************************************************************
    
-int lookup_host(char *name, char *addr) {
+int lookup_host(const char *name, char *addr) {
   int i, oldest_slot, slot;
   long int oldest_count;
   DNS_entry_t *list;

@@ -75,8 +75,17 @@ typedef struct {  // expire_log args
 
 typedef struct {          //**Allocate args
    RID_t     rid;            //RID to use (0=don't care)
+   Cap_t     master_cap;     //Master cap for IBP_SPLIT_ALLOCATE
+   char      crid[128];      //** Character version of the RID for querying
    Allocation_t a;           //Allocation being created
 } Cmd_allocate_t;
+
+typedef struct {          //**merge allocation args
+   RID_t     rid;            //RID for both allocations
+   Cap_t     mkey;           //Master cap
+   Cap_t     ckey;           //Child cap
+   char      crid[128];      //** Character version of the RID for querying
+} Cmd_merge_t;
 
 #define PASSLEN  32
 typedef struct {          //** Status Args
@@ -96,15 +105,15 @@ typedef struct {
   Cap_t   cap;             //** Manage cap of original allocation
   off_t   offset;          //** Offset into original allocation 
   off_t   len;             //** Length in original alloc if offset=len=0 then full range is given  
-  uint32_t expiration;       //** Duration of proxy allocation
-} Cmd_proxy_alloc_t;
+  uint32_t expiration;       //** Duration of alias allocation
+} Cmd_alias_alloc_t;
 
 typedef struct {
   RID_t rid;               //** RID for querying
   char    crid[128];       //** Character version of the RID for querying
   char    cid[64];        //** Character version of the ID for querying
   Cap_t   cap;             //** Key
-  Cap_t   master_cap;      //** Master manage key for PROXY_MANAGE
+  Cap_t   master_cap;      //** Master manage key for ALIAS_MANAGE
   Rsize_t new_size;        //** New size
   off_t offset;
   int   subcmd;            //** Subcommand
@@ -133,6 +142,9 @@ typedef struct {
 typedef struct {
   int      recving;        //** read state
   int      retry;          //** Used only for IBP_copy commands
+  int      transfer_dir;   //** either IBP_PULL or IBP_PUSH
+  int      ctype;          //** Connection type
+  int      write_mode;     //** Write mode, 0=use dest offset, 1=append data
   RID_t rid;               //** RID for querying
   osd_id_t  id;            //** Object id
   char    crid[128];       //** Character version of the RID for querying
@@ -141,6 +153,7 @@ typedef struct {
   Resource_t *r;           //** Resource being used
   Task_que_t *tq;          //** Task que struct
   Cap_t   cap;             //** Key
+  off_t   remote_offset;   //** Offset into allocation to start writing
   off_t   offset;          //** Offset into allocation to start writing
   off_t   len;             //** Length of write
   off_t   pos;             //** Current buf pos
@@ -148,7 +161,7 @@ typedef struct {
   int     valid_conn;      //** Determines if I need to make a new depot connection
   time_t remote_sto;       //** REmote commands server timeout
   time_t remote_cto;       //** Remote commands client timeout
-  char   remote_wcap[1024];//** Remote Write cap for IBP_*copy commands
+  char   remote_cap[1024]; //** Remote Read/Write cap for IBP_*SEND/IBP_PULL/IBP_PUSH commands
   Allocation_t a;          //** Allocation for command
 } Cmd_read_t;
 
@@ -168,9 +181,10 @@ typedef union {            //** Union of command args
     Cmd_allocate_t allocate;
     Cmd_status_t   status;
     Cmd_manage_t   manage;
+    Cmd_merge_t    merge;
     Cmd_write_t    write;
     Cmd_read_t     read;
-    Cmd_proxy_alloc_t  proxy_alloc;
+    Cmd_alias_alloc_t  alias_alloc;
     Cmd_internal_get_alloc_t get_alloc;
     Cmd_internal_date_free_t date_free;
     Cmd_internal_expire_log_t expire_log;

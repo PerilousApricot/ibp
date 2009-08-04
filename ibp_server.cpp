@@ -107,14 +107,12 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
 //  GError *error = NULL;
   Server_t *server;
   char *str;
-  int val;
+  int val, k;
+  gsize n;
   pMount_t *pm, *pmarray;
 
   // *** Initialize the data structure to default values ***
   server = &(cfg->server);
-  assert((server->hostname = (char *)malloc(512)) != NULL);  server->hostname[511] = '\0';
-  gethostname(server->hostname, 511);
-  server->port = IBP_PORT;
   server->max_threads = 64;
   server->max_pending = 16;
   server->min_idle = 60;
@@ -132,6 +130,9 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
   server->lazy_allocate = 1;
   server->alog_name = "ibp_activity.log";
   server->alog_max_size = 100*1024*1024;
+  server->alog_max_history = 1;
+  server->alog_host = NULL;
+  server->alog_port = 0;
   cfg->dbenv_loc = "/tmp/ibp_dbenv";
   cfg->db_mem = 256;
   cfg->tmpdir = "/etc/ibp";
@@ -139,10 +140,35 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
   cfg->truncate_expiration = 0;
 
   // *** Parse the Server settings ***
-  str = g_key_file_get_string(keyfile, "server", "address", NULL);
-  if (str != NULL) { free(server->hostname); server->hostname = str; }
-  val = g_key_file_get_integer(keyfile, "server", "port", NULL);
-  if (val > 0) server->port = val;
+  char **list = g_key_file_get_string_list(keyfile, "server", "interfaces",  &n, NULL);
+  interface_t *iface;
+  if (list == NULL) {
+     server->iface = (interface_t *)malloc(sizeof(interface_t));
+     assert(server->iface != NULL);
+     server->n_iface = 1;
+     iface = server->iface;
+     assert((iface->hostname = (char *)malloc(512)) != NULL);  iface->hostname[511] = '\0';
+     gethostname(iface->hostname, 511);
+     iface->port = IBP_PORT;
+  } else {  //** Cycle through the hosts
+     server->iface = (interface_t *)malloc(sizeof(interface_t)*n);
+     assert(server->iface != NULL);
+     server->n_iface = n;
+     char *bstate;
+     int fin;
+     for (k=0; k<n; k++) {
+        iface = &(server->iface[k]);
+        iface->hostname = string_token(list[k], ":", &bstate, &fin);
+        if (sscanf(string_token(NULL, " ", &bstate, &fin), "%d", &(iface->port)) != 1) {
+           iface->port = IBP_PORT;
+        }     
+     }
+  }
+
+//  str = g_key_file_get_string(keyfile, "server", "address", NULL);
+//  if (str != NULL) { free(server->hostname); server->hostname = str; }
+//  val = g_key_file_get_integer(keyfile, "server", "port", NULL);
+//  if (val > 0) server->port = val;
   val = g_key_file_get_integer(keyfile, "server", "threads", NULL);
   if (val > 0) server->max_threads = val;
   val = g_key_file_get_integer(keyfile, "server", "max_pending", NULL);
@@ -190,6 +216,13 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
      server->alog_max_size = -1;
   }
 
+  str = g_key_file_get_string(keyfile, "server", "activity_host", NULL);
+  if (str != NULL) server->alog_host = str;
+  val = g_key_file_get_integer(keyfile, "server", "activity_max_history", NULL);
+  if (val > 0) server->alog_max_history = val;
+  val = g_key_file_get_integer(keyfile, "server", "activity_port", NULL);
+  if (val > 0) server->alog_port = val;
+
   val = g_key_file_get_integer(keyfile, "server", "force_resource_rebuild", NULL);
   if (val > 0) cfg->force_resource_rebuild = val;
   val = g_key_file_get_integer(keyfile, "server", "truncate_duration", NULL);
@@ -202,7 +235,7 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
   set_log_maxsize(cfg->server.log_maxsize);
 
   // *** Now iterate through each resource which is assumed to be all groups beginning with "resource" ***      
-  cfg->dbenv = create_db_env(cfg->dbenv_loc, cfg->db_mem);
+  cfg->dbenv = create_db_env(cfg->dbenv_loc, cfg->db_mem, cfg->force_resource_rebuild);
   gsize ngroups, i;
   char **group = g_key_file_get_groups(keyfile, &ngroups);
   cfg->n_resources = 0;
@@ -319,6 +352,7 @@ int main(int argc, const char **argv)
 
   Config_t config;
   char *config_file;
+  int i;
 
   global_config = &config;   //** Make the global point to what's loaded
   memset(global_config, 0, sizeof(Config_t));  //** init the data
@@ -368,7 +402,7 @@ int main(int argc, const char **argv)
   init_thread_slots(2*config.server.max_threads);  //** Make pigeon holes
 
   dns_cache_init(1000);
-  init_subnet_list(config.server.hostname);  
+  init_subnet_list(config.server.iface[0].hostname);  
 
   //*** Install the commands: loads Vectable info and parses config options only ****
   install_commands(keyfile);
@@ -425,6 +459,8 @@ printf("ibp_server.c: STDOUT=STDERR=LOG_FD() dnoes not work!!!!!!!!!!!!!!!!!!!!!
   //*** Initialize all command data structures.  This is mainly 3rd party commands ***
   initialize_commands();
 
+  //** Launch the garbage collection threads
+  for (i=0; i<config.n_resources; i++) launch_resource_cleanup_thread(&(config.res[i]));
   //*** Start the activity log ***
   alog_open();
 

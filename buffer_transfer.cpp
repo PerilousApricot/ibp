@@ -99,11 +99,9 @@ void wake_up_task(ibp_task_t *task, int ns_mode)
 //     1 -- Completed provided task
 //************************************************************************************
 
-int read_from_disk(ibp_task_t *task, Allocation_t *a)
+int read_from_disk(ibp_task_t *task, Allocation_t *a, off_t *left, Resource_t *res)
 {
   NetStream_t *ns = task->ns;
-  Cmd_state_t *cmd = &(task->cmd); 
-  Cmd_read_t *r = &(cmd->cargs.read);
   int bufsize = 2*1048576;
   int nbytes, ntotal, nwrite, shortwrite, pos, nleft, err;
   int bpos, btotal, bleft;
@@ -112,16 +110,16 @@ int read_from_disk(ibp_task_t *task, Allocation_t *a)
   int task_status;
 
   nbytes = a->size;
-  log_printf(10, "read_from_disk: ns=%d id=" LU " a.size=%d a.r_pos=" LU " len=" LU "\n", task->ns->id, a->id, nbytes, a->r_pos, r->len);
+  log_printf(10, "read_from_disk: ns=%d id=" LU " a.size=%d a.r_pos=" LU " len=" OT "\n", task->ns->id, a->id, nbytes, a->r_pos, *left);
 flush_log();
-  if (r->left == 0) return(1);  //** Nothing to do
+  if (*left == 0) return(1);  //** Nothing to do
 
   task_status = 0;  
   set_net_timeout(&dt, 1, 0);  //** set the max time we'll wait for data  
   
   shortwrite = 0;        
   pos = a->r_pos;  //** Get the disk start pos from the allocation
-  nleft = (r->left > a->size) ? a->size : r->left;
+  nleft = (*left > a->size) ? a->size : *left;
   if (a->size <= 0) {
      return(0);   //** Nothing in the buffer to send
   } 
@@ -133,11 +131,11 @@ flush_log();
      nbytes = (nleft < bufsize) ? nleft : bufsize;
      if (nbytes > a->size) nbytes = a->size;
      if ((pos+nbytes) > a->max_size) nbytes = a->max_size - pos;   //**if FIFO ro CIRQ the start pos may noe be 0
-     err = read_allocation_with_id(r->r, a->id, pos, nbytes, buffer);
+     err = read_allocation_with_id(res, a->id, pos, nbytes, buffer);
      if (err != 0) {
         char tmp[128];
         log_printf(0, "read_disk: Error with read_allocation(%s, " LU ", %d, %d, buffer) = %d\n",
-             rid2str(&(r->r->rid), tmp, sizeof(tmp)), a->id, pos, nbytes, err); 
+             rid2str(&(res->rid), tmp, sizeof(tmp)), a->id, pos, nbytes, err); 
         shortwrite = 100;
         nwrite = err;
      }
@@ -156,14 +154,14 @@ flush_log();
            shortwrite = 100;  //** closed connection
         }
 
-        log_printf(15, "read_from_disk: id=" LU " len=" LU " * off=" LU " left=" LU " nbytes = %d -- bpos=%d, pos=%d nleft=%d, ntotal=%d, nwrite=%d * shortwrite=%d ns=%d\n", 
-             a->id, r->len, r->offset, r->left, nbytes, bpos, pos, bleft, btotal, nwrite, shortwrite, task->ns->id);
+        log_printf(15, "read_from_disk: id=" LU " nbytes = %d -- bpos=%d, pos=%d nleft=%d, ntotal=%d, nwrite=%d * shortwrite=%d ns=%d\n", 
+             a->id, nbytes, bpos, pos, bleft, btotal, nwrite, shortwrite, task->ns->id);
      } while ((btotal < nbytes) && (shortwrite < 3));
 
      //** Update totals
      pos += btotal;   
      nleft -= btotal;
-     r->left -= btotal;
+     *left -= btotal;
      a->r_pos += btotal;
 
      //**handle buf wrap arounds
@@ -181,9 +179,9 @@ flush_log();
      log_printf(10, "read_from_disk: Socket error with ns=%dfrom closing connection\n", ns->id);
      task_status = -1;
   } else {           //** short write
-     r->pos = pos;
+//     r->pos = pos;
 
-     if (r->left == 0) {   //** Finished data transfer
+     if (*left == 0) {   //** Finished data transfer
         log_printf(10, "read_from_disk: Completed transfer! ns=%d tid=" LU "\n", task->ns->id, task->tid);
         task_status = 1;
      } else {
@@ -204,10 +202,8 @@ flush_log();
 //     2 -- Buffer full so block
 //************************************************************************************
 
-int write_to_disk(ibp_task_t *task, Allocation_t *a)
+int write_to_disk(ibp_task_t *task, Allocation_t *a, off_t *left, Resource_t *res)
 {
-  Cmd_state_t *cmd = &(task->cmd); 
-  Cmd_write_t *w = &(cmd->cargs.write);
   int bufsize = 2*1048576;
   int nbytes, ntotal, nread, shortread, pos, nleft, err;
   char buffer[bufsize];
@@ -217,7 +213,7 @@ int write_to_disk(ibp_task_t *task, Allocation_t *a)
 
   log_printf(10, "write_to_disk: id=" LU " ns=%d\n", a->id, task->ns->id);
 
-  if (w->left == 0) return(1);   //** Nothing to do
+  if (*left == 0) return(1);   //** Nothing to do
 
   task_status = 0;  
   set_net_timeout(&dt, 1, 0);  //** set the max time we'll wait for data  
@@ -226,16 +222,16 @@ int write_to_disk(ibp_task_t *task, Allocation_t *a)
   if ((a->size == 0) && (a->type != IBP_BYTEARRAY)) { a->r_pos = a->w_pos = 0; }
 
   pos = a->w_pos;
-  nleft = w->left;
+  nleft = *left;
   if (a->type == IBP_BYTEARRAY) {
-     nleft = w->left;   //** Already validated range in calling routine
+     nleft = *left;   //** Already validated range in calling routine
   } else {
-     nleft = (w->left > (a->max_size - a->size)) ? (a->max_size - a->size) : w->left;
+     nleft = (*left > (a->max_size - a->size)) ? (a->max_size - a->size) : *left;
   }
 
   ntotal = 0;
-  debug_printf(10, "write_to_disk(BA): start.... id=" LU " * len=" LU " * max_size=" LU " * curr_size=" LU " * max_transfer=%d pos=%d w->left=" OT " ns=%d\n", 
-         a->id, w->len, a->max_size, a->size, nleft, pos, w->left, task->ns->id);
+  debug_printf(10, "write_to_disk(BA): start.... id=" LU " * max_size=" LU " * curr_size=" LU " * max_transfer=%d pos=%d left=" OT " ns=%d\n", 
+         a->id, a->max_size, a->size, nleft, pos, *left, task->ns->id);
   
   if (nleft == 0) {  //** no space to store anything
      return(0);
@@ -259,11 +255,11 @@ int write_to_disk(ibp_task_t *task, Allocation_t *a)
      nread = bpos;
 
      if (nread > 0) {
-         err = write_allocation_with_id(w->r, a->id, pos, nread, buffer);
+         err = write_allocation_with_id(res, a->id, pos, nread, buffer);
          if (err != 0) {
             char tmp[128];
             log_printf(0, "write_to_disk: Error with write_allocation(%sZ, " LU ", %d, %d, buffer) = %d  tid=" LU "\n",
-                    rid2str(&(w->r->rid), tmp, sizeof(tmp)), a->id, pos, nread, err, task->tid); 
+                    rid2str(&(res->rid), tmp, sizeof(tmp)), a->id, pos, nread, err, task->tid); 
             shortread = 100;
             nread = err;
          }
@@ -275,8 +271,8 @@ int write_to_disk(ibp_task_t *task, Allocation_t *a)
          shortread++;
       }
 
-     log_printf(15, "write_to_disk: id=" LU " len=" LU " * off=" LU " left=" LU " -- pos=%d, nleft=%d, ntotal=%d, nread=%d ns=%d\n", 
-              a->id, w->len, w->offset, w->left, pos, nleft, ntotal, nread, task->ns->id);
+     log_printf(15, "write_to_disk: id=" LU " left=" LU " -- pos=%d, nleft=%d, ntotal=%d, nread=%d ns=%d\n", 
+              a->id, *left, pos, nleft, ntotal, nread, task->ns->id);
   } while ((ntotal < nleft) && (shortread < 3));
 
   if (shortread >= 100) {        //** Dead connection
@@ -287,13 +283,13 @@ int write_to_disk(ibp_task_t *task, Allocation_t *a)
      } else {
        a->size += ntotal;
      }
-     w->left -= ntotal;
-     w->pos = pos;
+     *left -= ntotal;
+//     w->pos = pos;
      a->w_pos = pos;
 //     task_status = (a->size == a->max_size) ? 2 : 0;  
      task_status = 0;
 
-     if (w->left == 0) {   //** Finished data transfer
+     if (*left == 0) {   //** Finished data transfer
         log_printf(10, "write_to_disk: Completed transfer! ns=%d tid=" LU " a.size=" LU " a.w_pos=" LU "\n", task->ns->id, task->tid, a->size, a->w_pos);
         task_status = 1;
      } else {

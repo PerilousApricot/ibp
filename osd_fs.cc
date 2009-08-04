@@ -186,18 +186,12 @@ int osd_fs::remove(osd_id_t id) {
 }
 
 //*************************************************************
-// truncate - truncates a file to 0
+// truncate - truncates a file to a fixed size
 //*************************************************************
 
-int osd_fs::truncate(osd_id_t id) {
+int osd_fs::truncate(osd_id_t id, size_t size) {
    char fname[pathlen];
-   FILE *fout = fopen(_id2fname(id, fname, sizeof(fname)), "w");
-
-   if (fout == NULL) return(-1);
-
-   fclose(fout);
-
-   return(0);
+   return(::truncate(_id2fname(id, fname, sizeof(fname)), size));
 }
 
 //*************************************************************
@@ -256,7 +250,7 @@ int osd_fs::write(osd_id_t id, off_t offset, size_t len, buffer_t buffer) {
 
 int osd_fs::read(osd_id_t id, off_t offset, size_t len, buffer_t buffer) {
    char fname[pathlen];
-   int err, n;
+   int n;
    
    int flags = O_CREAT | O_RDONLY;
    int fd = ::open(_id2fname(id, fname, sizeof(fname)), flags); 
@@ -351,10 +345,15 @@ int osd_fs::iterator_next(void *arg, osd_id_t *id)
        if (iter->n == DIR_MAX) return(1);   //** Finished
        closedir(iter->cdir);
        if (open_fs_dir(iter) != 0) return(1);   //*** Error opening the directory
-    } else if ((strcmp(result->d_name, ".") != 0) && (strcmp(result->d_name, "..") != 0))
+    } else if ((strcmp(result->d_name, ".") != 0) && (strcmp(result->d_name, "..") != 0)) {
       finished = 1;               //** Found a valid file
     }
-  while (finished == 0);
+//if (result==NULL) {
+//  log_printf(15, "osd_fs:iterator_next: result=NULL n=%d\n", iter->n); flush_log();
+//} else {
+//  log_printf(15, "osd_fs:iterator_next: d_name=%s\n", result->d_name); flush_log();
+//}
+  } while (finished == 0);
 
   sscanf(result->d_name, LU, id);
   return(0);

@@ -97,11 +97,11 @@ Stack_t *new_stack() {
 }  
 
 //***************************************************
-//free_stack - frees a stack.  If data_also == 1 then
-//     the data is also freed.
+//empty_stack - REmoves all stack entries.  
+//   If data_also == 1 then the data is also freed.
 //***************************************************
 
-void free_stack(Stack_t *stack, int data_also) {
+void empty_stack(Stack_t *stack, int data_also) {
   void *ptr;
 
   if (data_also == 1) {
@@ -111,7 +111,15 @@ void free_stack(Stack_t *stack, int data_also) {
   } else {
     while ((ptr = pop(stack)) != NULL) { };
   }
+}
 
+//***************************************************
+//free_stack - frees a stack.  If data_also == 1 then
+//     the data is also freed.
+//***************************************************
+
+void free_stack(Stack_t *stack, int data_also) {
+  empty_stack(stack, data_also);
   free(stack);
 }
 

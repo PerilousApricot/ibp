@@ -69,7 +69,7 @@ int handle_allocate(ibp_task_t *task)
    Resource_t *res;
 
    char token[4096];
-   Allocation_t a; 
+   Allocation_t a, ma; 
    Cmd_state_t *cmd = &(task->cmd);
 
    debug_printf(1, "handle_allocate: Starting to process command\n");
@@ -102,23 +102,57 @@ int handle_allocate(ibp_task_t *task)
      alloc->expiration = res->max_duration + time(NULL);     
    }
 
-   alog_append_ibp_allocate(task->myid, res->rl_index, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration);
+   if (cmd->command == IBP_SPLIT_ALLOCATE) {
+      //** Get the Master allocation ***
+      if ((err = get_allocation_by_cap_resource(res, MANAGE_CAP, &(cmd->cargs.allocate.master_cap), &ma)) != 0) {
+         log_printf(10, "handle_split_allocate: Invalid master cap: %s rid=%s\n", cmd->cargs.allocate.master_cap.v, res->name);
+         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+         return(-1);
+      }
+      
+      alog_append_ibp_split_allocate(task->myid, res->rl_index, ma.id, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration);
+
+      lock_osd_id(ma.id);  //** Redo the get allocation again with the lock enabled ***
+      if ((err = get_allocation_by_cap_resource(res, MANAGE_CAP, &(cmd->cargs.allocate.master_cap), &ma)) != 0) {
+         log_printf(10, "handle_split_allocate: Invalid master cap: %s rid=%s\n", cmd->cargs.allocate.master_cap.v, res->name);
+         unlock_osd_id(ma.id);
+         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+         return(-1);
+      }
+   } else {
+      alog_append_ibp_allocate(task->myid, res->rl_index, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration);
+   }
 
    d = alloc->expiration - time(NULL);
    debug_printf(10, "handle_allocate:  expiration: %u (%d sec from now)\n", alloc->expiration, d); flush_debug();
 
    if (res->max_duration < d) {
        log_printf(1, "handle_allocate: Duration(%d sec) exceeds that for RID %s of %d sec\n", d, res->name, res->max_duration);
+       if (cmd->command == IBP_SPLIT_ALLOCATE) unlock_osd_id(ma.id);
        send_cmd_result(task, IBP_E_LONG_DURATION);
        return(-1);
    }
 
    //** Perform the allocation **
    d = (global_config->server.lazy_allocate == 1) ? 0 : 1;
-   if ((d = create_allocation_resource(res, &a, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration, 0, d)) != 0) {
-      log_printf(1, "handle_allocate: create_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
-      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
-      return(-1);
+   if (cmd->command == IBP_SPLIT_ALLOCATE) {
+      if ((d = split_allocation_resource(res, &ma, &a, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration, 0, d)) != 0) {
+         log_printf(1, "handle_allocate: split_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
+         unlock_osd_id(ma.id);  //** Now we can unlock the master
+         send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
+         return(-1);
+      }
+
+      //** Update the master's manage timestamp
+      update_manage_history(res, ma.id, ma.is_alias, &(task->ipadd), cmd->command, 0, a.reliability, a.expiration, a.max_size, 0);
+
+      unlock_osd_id(ma.id);  //** Now we can unlock the master
+   } else {
+      if ((d = create_allocation_resource(res, &a, alloc->max_size, alloc->type, alloc->reliability, alloc->expiration, 0, d)) != 0) {
+         log_printf(1, "handle_allocate: create_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
+         send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
+         return(-1);
+      }
   }
 
    if (a.type != IBP_BYTEARRAY) {  //** Set the size to be 0 for all the Queue types
@@ -136,22 +170,21 @@ int handle_allocate(ibp_task_t *task)
    }
 
    //** Send the result back **
-   Server_t *server = &(global_config->server);
+   ns_monitor_t *nm = ns_get_monitor(task->ns);
    snprintf(token, sizeof(token), "%d ibp://%s:%d/%s#%s/3862277/READ "
        "ibp://%s:%d/%s#%s/3862277/WRITE "
        "ibp://%s:%d/%s#%s/3862277/MANAGE \n",
        IBP_OK,
-       server->hostname, server->port, res->name, a.caps[READ_CAP].v,
-       server->hostname, server->port, res->name, a.caps[WRITE_CAP].v,
-       server->hostname, server->port, res->name, a.caps[MANAGE_CAP].v);
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[READ_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[WRITE_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[MANAGE_CAP].v);
 
    Net_timeout_t dt;
    convert_epoch_time2net(&dt, task->cmd_timeout);   
 
    debug_code(time_t tt=time(NULL);)
    debug_printf(1, "handle_allocate: before sending result time: %s\n", ctime(&tt));
-   err = write_netstream(task->ns, token, strlen(token), dt);
-   if (err == strlen(token)) err = 0;
+   err = write_netstream_block(task->ns, task->cmd_timeout, token, strlen(token));
 
    alog_append_osd_id(task->myid, a.id);
 
@@ -161,13 +194,101 @@ int handle_allocate(ibp_task_t *task)
       if (debug_level() > 5) print_allocation_resource(res, log_fd(), &a);
    )
 
-Allocation_history_t h1;
-get_history_table(res, a.id, &h1);
-log_printf(0, "handle_allocate history: r=%s id=" LU " h.id=" LU " write_slot=%d\n", res->name, a.id, h1.id, h1.write_slot);
+//Allocation_history_t h1;
+//get_history_table(res, a.id, &h1);
+//log_printf(0, "handle_allocate history: r=%s id=" LU " h.id=" LU " write_slot=%d\n", res->name, a.id, h1.id, h1.write_slot);
 
    return(err);
 }
 
+//*****************************************************************
+//  handle_merge - Merges 2 allocations
+//*****************************************************************
+
+int handle_merge(ibp_task_t *task)
+{
+   int err;
+   Resource_t *r;
+   Allocation_t ma, ca; 
+   Cmd_state_t *cmd = &(task->cmd);
+   Cmd_merge_t *op = &(cmd->cargs.merge);
+
+   debug_printf(1, "handle_merge: Starting to process command\n");
+
+      //** Check the resource **
+   r = resource_lookup(global_config->rl, op->crid);
+   if (r == NULL) {    //**Can't find the resource
+      log_printf(1, "handle_merge: Invalid resource: %s\n", op->crid);
+      alog_append_ibp_merge(task->myid, 0, 0, -1);
+      send_cmd_result(task, IBP_E_INVALID_RID);
+      return(-1);
+   }   
+
+   //** Get the master allocation ***
+  if ((err = get_allocation_by_cap_resource(r, MANAGE_CAP, &(op->mkey), &ma)) != 0) {
+     log_printf(10, "handle_merge: Invalid mcap: %s rid=%s\n", op->mkey.v, r->name);
+     alog_append_ibp_merge(task->myid, 0, 0, r->rl_index);
+     send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+     return(-1);
+  }
+
+  //** and the child allocation
+  if ((err = get_allocation_by_cap_resource(r, MANAGE_CAP, &(op->ckey), &ca)) != 0) {
+     log_printf(10, "handle_merge: Invalid childcap: %s rid=%s\n", op->ckey.v, r->name);
+     alog_append_ibp_merge(task->myid, ma.id, 0, r->rl_index);
+     send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+     return(-1);
+  }
+
+  alog_append_ibp_merge(task->myid, ma.id, ca.id, r->rl_index);
+
+  //** Now do the same thing with locks enabled
+  lock_osd_id_pair(ma.id, ca.id);
+
+   //** Get the master allocation ***
+  if ((err = get_allocation_by_cap_resource(r, MANAGE_CAP, &(op->mkey), &ma)) != 0) {
+     log_printf(10, "handle_merge: Invalid mcap: %s rid=%s\n", op->mkey.v, r->name);
+     alog_append_ibp_merge(task->myid, 0, 0, r->rl_index);
+     unlock_osd_id_pair(ma.id, ca.id);
+     send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+     return(-1);
+  }
+
+  //** and the child allocation
+  if ((err = get_allocation_by_cap_resource(r, MANAGE_CAP, &(op->ckey), &ca)) != 0) {
+     log_printf(10, "handle_merge: Invalid childcap: %s rid=%s\n", op->ckey.v, r->name);
+     alog_append_ibp_merge(task->myid, ma.id, 0, r->rl_index);
+     unlock_osd_id_pair(ma.id, ca.id);
+     send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
+     return(-1);
+  }
+
+   //** Update the manage timestamp
+   update_manage_history(r, ca.id, ca.is_alias, &(task->ipadd), cmd->command, 0, 0, 0, ca.max_size, 0);
+
+   //** Check the child ref count
+   if ((ca.read_refcount == 1) && (ca.write_refcount == 0)) {
+      //** merge the allocation **
+      if ((err = merge_allocation_resource(r, &ma, &ca)) != 0) {
+         log_printf(1, "handle_merge: merge_allocation_resource failed on RID %s!  Error=%d\n", r->name, err);
+         unlock_osd_id_pair(ma.id, ca.id);   
+         send_cmd_result(task, IBP_E_GENERIC);
+         return(-1);
+      }
+   } else {
+      log_printf(15, "handle_merge: Bad child refcount! RID=%s  ca.read=%d ca.write=%d\n", r->name, ca.read_refcount, ca.write_refcount);
+      unlock_osd_id_pair(ma.id, ca.id);   
+      send_cmd_result(task, IBP_E_GENERIC);
+      return(-1);
+   }
+
+   unlock_osd_id_pair(ma.id, ca.id);   
+
+   send_cmd_result(task, IBP_OK);
+
+   debug_printf(1, "handle_merge: completed\n");
+   return(0);
+}
 
 //*****************************************************************
 // handle_rename - Processes the allocation rename command
@@ -220,7 +341,7 @@ int handle_rename(ibp_task_t *task)
   }
 
    //** Update the manage timestamp
-   update_manage_history(res, a.id, &(task->ipadd), cmd->command, 0, a.reliability, a.expiration, a.max_size, 0);
+   update_manage_history(res, a.id, a.is_alias, &(task->ipadd), cmd->command, 0, a.reliability, a.expiration, a.max_size, 0);
 
    //** Rename the allocation **
    if ((d = rename_allocation_resource(res, &a)) != 0) {
@@ -233,22 +354,19 @@ int handle_rename(ibp_task_t *task)
    unlock_osd_id(a.id);
 
    //** Send the result back **
-   Server_t *server = &(global_config->server);
+   //** Send the result back **
+   ns_monitor_t *nm = ns_get_monitor(task->ns);
    snprintf(token, sizeof(token), "%d ibp://%s:%d/%s#%s/3862277/READ "
        "ibp://%s:%d/%s#%s/3862277/WRITE "
        "ibp://%s:%d/%s#%s/3862277/MANAGE \n",
        IBP_OK,
-       server->hostname, server->port, res->name, a.caps[READ_CAP].v,
-       server->hostname, server->port, res->name, a.caps[WRITE_CAP].v,
-       server->hostname, server->port, res->name, a.caps[MANAGE_CAP].v);
-
-   Net_timeout_t dt;
-   convert_epoch_time2net(&dt, task->cmd_timeout);   
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[READ_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[WRITE_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, a.caps[MANAGE_CAP].v);
 
    debug_code(time_t tt=time(NULL);)
    debug_printf(1, "handle_rename: before sending result time: %s\n", ctime(&tt));
-   err = write_netstream(task->ns, token, strlen(token), dt);
-   if (err == strlen(token)) err = 0;
+   err = write_netstream_block(task->ns, task->cmd_timeout, token, strlen(token));
 
    alog_append_osd_id(task->myid, a.id);
 
@@ -344,18 +462,13 @@ int handle_internal_get_alloc(ibp_task_t *task)
 
    //*** Send back the results ***
    sprintf(buffer, "%d " LU " \n",IBP_OK, nbytes); 
-   Net_timeout_t dt;
-   convert_epoch_time2net(&dt, task->cmd_timeout);   
-   err = write_netstream(task->ns, buffer, strlen(buffer), dt);
-   if (err == strlen(token)) err = 0;
+   err = write_netstream_block(task->ns, task->cmd_timeout, buffer, strlen(buffer));
 
    //** Send the allocation
-   err = write_netstream(task->ns, (char *)&a, sizeof(a), dt);
-   if (err == sizeof(a)) err = 0;
+   err = write_netstream_block(task->ns, task->cmd_timeout, (char *)&a, sizeof(a));
 
    //** ...and the history
-   err = write_netstream(task->ns, (char *)&h, sizeof(h), dt);
-   if (err == sizeof(h)) err = 0;
+   err = write_netstream_block(task->ns, task->cmd_timeout, (char *)&h, sizeof(h));
 
    //** Send back the data if needed **
    if (arg->offset > -1) {
@@ -368,7 +481,7 @@ int handle_internal_get_alloc(ibp_task_t *task)
       rcmd->len = nbytes;
       rcmd->offset = arg->offset;
       rtask.ns = task->ns;
-      err = read_from_disk(&rtask, &a);
+      err = read_from_disk(&rtask, &a, &(rcmd->left), rcmd->r);
    }
 
    debug_printf(1, "handle_internal_get_alloc: Allocation:\n");
@@ -383,39 +496,39 @@ int handle_internal_get_alloc(ibp_task_t *task)
 
 
 //*****************************************************************
-// handle_proxy_allocate - Generates a proxy allocation 
+// handle_alias_allocate - Generates a alias allocation 
 //
 // Results:
 //    status readCap writeCap manageCap
 //*****************************************************************
 
-int handle_proxy_allocate(ibp_task_t *task)
+int handle_alias_allocate(ibp_task_t *task)
 {
    int d, err;
    Resource_t *res;
 
    char token[4096];
-   Allocation_t a, proxy_alloc; 
+   Allocation_t a, alias_alloc; 
    Cmd_state_t *cmd = &(task->cmd);
-   Cmd_proxy_alloc_t *pa = &(cmd->cargs.proxy_alloc);
+   Cmd_alias_alloc_t *pa = &(cmd->cargs.alias_alloc);
 
-   debug_printf(1, "handle_proxy_allocate: Starting to process command\n");
+   debug_printf(1, "handle_alias_allocate: Starting to process command\n");
 
    err = 0;
 
       //** Check the resource **
    res = resource_lookup(global_config->rl, rid2str(&(pa->rid), token, sizeof(token)));
    if (res == NULL) {    //**Can't find the resource
-      log_printf(1, "handle_proxy_allocate: Invalid resource: %s\n", rid2str(&(pa->rid), token, sizeof(token)));
-      alog_append_proxy_alloc(task->myid, -1, 0, 0, 0, 0);
+      log_printf(1, "handle_alias_allocate: Invalid resource: %s\n", rid2str(&(pa->rid), token, sizeof(token)));
+      alog_append_alias_alloc(task->myid, -1, 0, 0, 0, 0);
       send_cmd_result(task, IBP_E_INVALID_RID);
       return(-1);
    }   
 
    //** Get the original allocation ***
    if ((err = get_allocation_by_cap_resource(res, MANAGE_CAP, &(pa->cap), &a)) != 0) {
-     log_printf(10, "handle_proxy_allocate: Invalid cap: %s rid=%s\n", pa->cap.v, res->name);
-     alog_append_proxy_alloc(task->myid, -1, 0, 0, 0, 0);
+     log_printf(10, "handle_alias_allocate: Invalid cap: %s rid=%s\n", pa->cap.v, res->name);
+     alog_append_alias_alloc(task->myid, -1, 0, 0, 0, 0);
      send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
      return(-1);
    }
@@ -424,21 +537,21 @@ int handle_proxy_allocate(ibp_task_t *task)
 
    //** Get the original allocation again with the lock ***
    if ((err = get_allocation_by_cap_resource(res, MANAGE_CAP, &(pa->cap), &a)) != 0) {
-     log_printf(10, "handle_proxy_allocate: Invalid cap: %s rid=%s\n", pa->cap.v, res->name);
-     alog_append_proxy_alloc(task->myid, -1, 0, 0, 0, 0);
+     log_printf(10, "handle_alias_allocate: Invalid cap: %s rid=%s\n", pa->cap.v, res->name);
+     alog_append_alias_alloc(task->myid, -1, 0, 0, 0, 0);
      send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
      unlock_osd_id(a.id);
      return(-1);
    }
 
    //** Validate the range and duration **
-//   log_printf(1, "handle_proxy_alloc:  pa->duration= %u\n", pa->expiration);
+//   log_printf(1, "handle_alias_alloc:  pa->duration= %u\n", pa->expiration);
    if (pa->expiration == 0) pa->expiration = a.expiration;
 
-   alog_append_proxy_alloc(task->myid, res->rl_index, a.id, pa->offset, pa->len, pa->expiration);
+   alog_append_alias_alloc(task->myid, res->rl_index, a.id, pa->offset, pa->len, pa->expiration);
 
    if (pa->expiration > a.expiration) {
-      log_printf(1, "handle_proxy_alloc: Proxy duration > actual allocation! proxy= %u alloc = %u\n", pa->expiration, a.expiration);
+      log_printf(1, "handle_alias_alloc: ALIAS duration > actual allocation! alias= %u alloc = %u\n", pa->expiration, a.expiration);
 
       send_cmd_result(task, IBP_E_LONG_DURATION);
       unlock_osd_id(a.id);
@@ -447,65 +560,61 @@ int handle_proxy_allocate(ibp_task_t *task)
 
    if ((pa->len + pa->offset) > a.max_size) {  
       uint64_t epos = pa->len + pa->offset;
-      log_printf(1, "handle_proxy_alloc: Proxy range > actual allocation! proxy= " LU " alloc = " LU "\n", epos, a.max_size);
+      log_printf(1, "handle_alias_alloc: ALIAS range > actual allocation! alias= " LU " alloc = " LU "\n", epos, a.max_size);
       send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
       unlock_osd_id(a.id);
       return(-1);
    }
 
-   //*** Create the proxy ***
-   if ((d =  create_allocation_resource(res, &proxy_alloc, 0, a.type, a.reliability, pa->expiration, 1, 0)) != 0) {
-      log_printf(1, "handle_proxy_alloc: create_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
+   //*** Create the alias ***
+   if ((d =  create_allocation_resource(res, &alias_alloc, 0, a.type, a.reliability, pa->expiration, 1, 0)) != 0) {
+      log_printf(1, "handle_alias_alloc: create_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
       send_cmd_result(task, IBP_E_GENERIC);
       unlock_osd_id(a.id);
       return(-1);
    }
 
    //** Store the creation timestamp **
-   set_alloc_timestamp(&(proxy_alloc.creation_ts), &(task->ipadd));
+   set_alloc_timestamp(&(alias_alloc.creation_ts), &(task->ipadd));
 
-   //*** Specifify the allocation as a proxy ***
-   proxy_alloc.proxy_id = a.id;
-   proxy_alloc.proxy_offset = pa->offset;
-   proxy_alloc.proxy_size = pa->len;
+   //*** Specifify the allocation as a alias ***
+   alias_alloc.alias_id = a.id;
+   alias_alloc.alias_offset = pa->offset;
+   alias_alloc.alias_size = pa->len;
 
    //** and store it back in the DB only **
-   if ((d = modify_allocation_resource(res, proxy_alloc.proxy_id, &proxy_alloc)) != 0) {
-      log_printf(1, "handle_proxy_allocate: modify_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
+   if ((d = modify_allocation_resource(res, alias_alloc.alias_id, &alias_alloc)) != 0) {
+      log_printf(1, "handle_alias_allocate: modify_allocation_resource failed on RID %s!  Error=%d\n", res->name, d);
       send_cmd_result(task, IBP_E_GENERIC);
       unlock_osd_id(a.id);
       return(-1);
    }
 
    //** Update the parent timestamp
-   update_manage_history(res, a.id, &(task->ipadd), IBP_PROXY_ALLOCATE, 0, proxy_alloc.proxy_offset, proxy_alloc.expiration, proxy_alloc.proxy_size, proxy_alloc.id);
+   update_manage_history(res, a.id, a.is_alias, &(task->ipadd), IBP_ALIAS_ALLOCATE, 0, alias_alloc.alias_offset, alias_alloc.expiration, alias_alloc.alias_size, alias_alloc.id);
 
    unlock_osd_id(a.id);
 
    //** Send the result back **
-   Server_t *server = &(global_config->server);
+   ns_monitor_t *nm = ns_get_monitor(task->ns);
    snprintf(token, sizeof(token), "%d ibp://%s:%d/%s#%s/3862277/READ "
        "ibp://%s:%d/%s#%s/3862277/WRITE "
        "ibp://%s:%d/%s#%s/3862277/MANAGE \n",
        IBP_OK,
-       server->hostname, server->port, res->name, proxy_alloc.caps[READ_CAP].v,
-       server->hostname, server->port, res->name, proxy_alloc.caps[WRITE_CAP].v,
-       server->hostname, server->port, res->name, proxy_alloc.caps[MANAGE_CAP].v);
-
-   Net_timeout_t dt;
-   convert_epoch_time2net(&dt, task->cmd_timeout);   
+       nm_get_host(nm), nm_get_port(nm), res->name, alias_alloc.caps[READ_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, alias_alloc.caps[WRITE_CAP].v,
+       nm_get_host(nm), nm_get_port(nm), res->name, alias_alloc.caps[MANAGE_CAP].v);
 
    debug_code(time_t tt=time(NULL);)
-   debug_printf(1, "handle_proxy_allocate: before sending result time: %s\n", ctime(&tt));
-   err = write_netstream(task->ns, token, strlen(token), dt);
-   if (err == strlen(token)) err = 0;
+   debug_printf(1, "handle_alias_allocate: before sending result time: %s\n", ctime(&tt));
+   err = write_netstream_block(task->ns, task->cmd_timeout, token, strlen(token));
 
-   alog_append_osd_id(task->myid, proxy_alloc.id);
+   alog_append_osd_id(task->myid, alias_alloc.id);
 
-   debug_printf(1, "handle_proxy_allocate: Allocation: %s", token);
+   debug_printf(1, "handle_alias_allocate: Allocation: %s", token);
 
    debug_code(
-      if (debug_level() > 5) print_allocation_resource(res, log_fd(), &proxy_alloc);
+      if (debug_level() > 5) print_allocation_resource(res, log_fd(), &alias_alloc);
    )
    return(err);
 }
@@ -544,9 +653,9 @@ int handle_status(ibp_task_t *task)
 
      char buffer[2048];
      char result[4096];
-     uint64_t total, total_used, total_free, rbytes, wbytes, cbytes;
-     uint64_t r_total, r_free, r_used, r_alloc, r_proxy, total_alloc, total_proxy;
-     double r_total_gb, r_free_gb, r_used_gb;
+     uint64_t total, total_used, total_diff, total_free, rbytes, wbytes, cbytes;
+     uint64_t r_total, r_diff, r_free, r_used, r_alloc, r_alias, total_alloc, total_alias;
+     double r_total_gb, r_diff_gb, r_free_gb, r_used_gb;
      Net_timeout_t dt;
      Resource_t *r;
      int i;
@@ -582,50 +691,53 @@ int handle_status(ibp_task_t *task)
      snprintf(buffer, sizeof(buffer)-1, "Depot-Depot copies: " LU " b (%.2lf GB)\n", cbytes, r_total_gb);
      strncat(result, buffer, sizeof(result)-1 - strlen(result)); 
 
-     total = 0; total_used = 0; total_free = 0; total_alloc = 0; total_proxy = 0;
+     total = 0; total_used = 0; total_free = 0; total_diff = 0; total_alloc = 0; total_alias = 0;
      for (i=0; i< global_config->n_resources; i++) {
          r = &(global_config->res[i]);
 
-         free_expired_allocations(r);  //** Free up any expired space 
+         r_free = resource_allocable(r, 0);  
 
          pthread_mutex_lock(&(r->mutex));
          r_total = r->max_size[ALLOC_TOTAL];
          r_used = r->used_space[ALLOC_HARD] + r->used_space[ALLOC_SOFT];
          r_alloc = r->n_allocs;
-         r_proxy = r->n_proxy;
+         r_alias = r->n_alias;
          pthread_mutex_unlock(&(r->mutex));
 
          if (r_total > r_used) {
-            r_free = r_total - r_used;
+            r_diff = r_total - r_used;
          } else {
-            r_free = 0;
+            r_diff = 0;
          }
          total = total + r_total;
          total_used = total_used + r_used;
-         total_free = total_free + r_free; 
+         total_diff = total_diff + r_diff; 
+         total_free = total_free + r_free;
          total_alloc = total_alloc + r_alloc;
-         total_proxy = total_proxy + r_proxy;
+         total_alias = total_alias + r_alias;
 
          r_total_gb = r_total / (1024.0*1024.0*1024.0);
          r_used_gb = r_used / (1024.0*1024.0*1024.0);
+         r_diff_gb = r_diff / (1024.0*1024.0*1024.0);
          r_free_gb = r_free / (1024.0*1024.0*1024.0);
-         snprintf(buffer, sizeof(buffer)-1, "RID: %s Max: " LU " b (%.2lf GB) Used: " LU " b (%.2lf GB) Free: " LU " b (%.2lf GB) Allocations: " LU " (" LU " proxy)\n", 
-             r->name, r_total, r_total_gb, r_used, r_used_gb, r_free, r_free_gb, r_alloc, r_proxy);
+         snprintf(buffer, sizeof(buffer)-1, "RID: %s Max: " LU " b (%.2lf GB) Used: " LU " b (%.2lf GB) Diff: " LU " b (%.2lf GB) Free: " LU " b (%.2lf GB) Allocations: " LU " (" LU " alias)\n", 
+             r->name, r_total, r_total_gb, r_used, r_used_gb, r_diff, r_diff_gb, r_free, r_free_gb, r_alloc, r_alias);
          strncat(result, buffer, sizeof(result)-1 - strlen(result)); 
      }
 
      r_total_gb = total / (1024.0*1024.0*1024.0);
      r_used_gb = total_used / (1024.0*1024.0*1024.0);
+     r_diff_gb = total_diff / (1024.0*1024.0*1024.0);
      r_free_gb = total_free / (1024.0*1024.0*1024.0);
-     snprintf(buffer, sizeof(buffer)-1, "Total resources: %d  Max: " LU " b (%.2lf GB) Used: " LU " b (%.2lf GB) Free: " LU " b (%.2lf GB) Allocations: " LU " (" LU " proxy)\n", 
-             global_config->n_resources, total, r_total_gb, total_used, r_used_gb, total_free, r_free_gb, total_alloc, total_proxy);
+     snprintf(buffer, sizeof(buffer)-1, "Total resources: %d  Max: " LU " b (%.2lf GB) Used: " LU " b (%.2lf GB) Diff: " LU " b (%.2lf GB) Free: " LU " b (%.2lf GB) Allocations: " LU " (" LU " alias)\n", 
+             global_config->n_resources, total, r_total_gb, total_used, r_used_gb, total_diff, r_diff_gb, total_free, r_free_gb, total_alloc, total_alias);
      strncat(result, buffer, sizeof(result)-1 - strlen(result)); 
 
      snprintf(buffer,sizeof(result)-1 - strlen(result), "\n");
      snprintf(buffer, sizeof(result)-1 - strlen(result), "END\n");
      strncat(result, buffer, sizeof(result) - 1 - strlen(result));
      i = strlen(result);
-     write_netstream(task->ns, result, i, dt);
+     write_netstream_block(task->ns, task->cmd_timeout, result, i);
 
      alog_append_cmd_result(task->myid, IBP_OK);
      
@@ -655,10 +767,8 @@ int handle_status(ibp_task_t *task)
      sprintf(buffer, "\n");
      strncat(result, buffer, sizeof(result) -1 - strlen(result));
 
-     Net_timeout_t dt;
-     convert_epoch_time2net(&dt, task->cmd_timeout);   
      log_printf(10, "handle_status: Sending resource list: %s\n", result);
-     write_netstream(task->ns, result, strlen(result), dt);
+     write_netstream_block(task->ns, task->cmd_timeout, result, strlen(result));
 
      alog_append_cmd_result(task->myid, IBP_OK);
   } else if (status->subcmd == IBP_ST_STATS) {  //** Send the depot stats
@@ -683,11 +793,11 @@ int handle_status(ibp_task_t *task)
 
      alog_append_status_inq(task->myid, r->rl_index);
 
-     free_expired_allocations(r);  //** Free up any expired space
-
      uint64_t totalconfigured;
      uint64_t totalused;
      uint64_t soft_alloc, hard_alloc, total_alloc;
+
+     total_alloc = resource_allocable(r, 0); 
 
      pthread_mutex_lock(&(r->mutex));
      totalconfigured = r->max_size[ALLOC_TOTAL];
@@ -697,9 +807,10 @@ int handle_status(ibp_task_t *task)
         hard_alloc = 0;
      } else {
         soft_alloc = r->max_size[ALLOC_SOFT] - r->used_space[ALLOC_SOFT];
+        if (soft_alloc > total_alloc) soft_alloc = total_alloc;
         hard_alloc = r->max_size[ALLOC_HARD] - r->used_space[ALLOC_HARD];
+        if (hard_alloc > total_alloc) hard_alloc = total_alloc;
      }
-     total_alloc = hard_alloc + soft_alloc;
 
      if (cmd->version == IBPv040) {
                                             //***  1       2       3     4      5       6       7       8        9       10      11     12     13   13
@@ -729,14 +840,9 @@ int handle_status(ibp_task_t *task)
 
      pthread_mutex_unlock(&(r->mutex));
 
-     Net_timeout_t dt;
-
      nres = snprintf(result, sizeof(result), "%d %d \n", IBP_OK, n);
-
-     convert_epoch_time2net(&dt, task->cmd_timeout);   
-     if (cmd->version != IBPv031) write_netstream(task->ns, result, nres, dt);
-     convert_epoch_time2net(&dt, task->cmd_timeout);   
-     write_netstream(task->ns, buffer, n, dt);
+     if (cmd->version != IBPv031) write_netstream_block(task->ns, task->cmd_timeout, result, nres);
+     write_netstream_block(task->ns, task->cmd_timeout, buffer, n);
 
      alog_append_cmd_result(task->myid, IBP_OK);
 
@@ -794,7 +900,7 @@ return(-1);
 //  IBP_PROBE (for an IBP_MANAGE command)
 //     status read_refcnt write_refcnt curr_size max_size time_remaining \n
 
-//  IBP_PROBE (for an IBP_PROXY_MANAGE command)
+//  IBP_PROBE (for an IBP_ALIAS_MANAGE command)
 //     status read_refcnt write_refcnt offset len time_remaining \n
 //
 //  NOTE: From my unsderstanding this command is flawed since any only READ counts
@@ -809,13 +915,13 @@ int handle_manage(ibp_task_t *task)
   Allocation_t *a = &(manage->a);
   Allocation_t ma;
   osd_id_t id, pid;
-  int lock, err, is_proxy;
-  uint64_t proxy_offset, proxy_len;
+  int lock, err, is_alias;
+  uint64_t alias_offset, alias_len;
 
   if (cmd->command == IBP_MANAGE) {
      debug_printf(1, "handle_manage: Starting to process IBP_MANAGE command ns=%d\n", ns_getid(task->ns));
   } else {
-     debug_printf(1, "handle_manage: Starting to process IBP_PROXY_MANAGE command ns=%d\n", ns_getid(task->ns));
+     debug_printf(1, "handle_manage: Starting to process IBP_ALIAS_MANAGE command ns=%d\n", ns_getid(task->ns));
   }
 
   Resource_t *r = resource_lookup(global_config->rl, manage->crid);
@@ -836,29 +942,29 @@ int handle_manage(ibp_task_t *task)
 
   pid = a->id;
 
-  is_proxy = a->is_proxy;
-  proxy_offset = 0;
-  proxy_len = a->max_size;
-  if ((a->is_proxy == 1) && (cmd->command == IBP_MANAGE)) {  //** This is a proxy cap so load the master and invoke restrictions
-     is_proxy = 1;
-     id = a->proxy_id;
-     proxy_offset = a->proxy_offset;
-     proxy_len =  a->proxy_size;
+  is_alias = a->is_alias;
+  alias_offset = 0;
+  alias_len = a->max_size;
+  if ((a->is_alias == 1) && (cmd->command == IBP_MANAGE)) {  //** This is a alias cap so load the master and invoke restrictions
+     is_alias = 1;
+     id = a->alias_id;
+     alias_offset = a->alias_offset;
+     alias_len =  a->alias_size;
 
-     log_printf(10, "handle_manage: ns=%d got a proxy cap! loading id " LU "\n", ns_getid(task->ns), id);
+     log_printf(10, "handle_manage: ns=%d got a alias cap! loading id " LU "\n", ns_getid(task->ns), id);
      
      if ((err = get_allocation_resource(r, id, a)) != 0) {
-        log_printf(10, "handle_manage: Invalid proxy id: " LU " rid=%s\n", id, r->name);
+        log_printf(10, "handle_manage: Invalid alias id: " LU " rid=%s\n", id, r->name);
         alog_append_manage_bad(task->myid, cmd->command, manage->subcmd);
         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
         return(-1);
      }     
 
-     if (proxy_len == 0) proxy_len = a->max_size - proxy_offset;
+     if (alias_len == 0) alias_len = a->max_size - alias_offset;
 
-     //** Can only isue a probe on a proxy allocation through ibp_manage
+     //** Can only isue a probe on a alias allocation through ibp_manage
      if (manage->subcmd != IBP_PROBE) { 
-        log_printf(10, "handle_manage: Invalid subcmd for proxy id: " LU " rid=%s\n", id, r->name);
+        log_printf(10, "handle_manage: Invalid subcmd for alias id: " LU " rid=%s\n", id, r->name);
         alog_append_manage_bad(task->myid, cmd->command, manage->subcmd);
         send_cmd_result(task, IBP_E_INVALID_CMD);
         return(-1);
@@ -866,16 +972,16 @@ int handle_manage(ibp_task_t *task)
   }
 
   //** Verify the master allocation if needed.  ***
-  if ((is_proxy == 1) && (cmd->command == IBP_PROXY_MANAGE) && (manage->subcmd != IBP_PROBE)) {
-     if ((err = get_allocation_resource(r, a->proxy_id, &ma)) != 0) {
-        log_printf(10, "handle_manage: Invalid proxy id: " LU " rid=%s\n", a->proxy_id, r->name);
+  if ((is_alias == 1) && (cmd->command == IBP_ALIAS_MANAGE) && (manage->subcmd != IBP_PROBE)) {
+     if ((err = get_allocation_resource(r, a->alias_id, &ma)) != 0) {
+        log_printf(10, "handle_manage: Invalid alias id: " LU " rid=%s\n", a->alias_id, r->name);
         alog_append_manage_bad(task->myid, cmd->command, manage->subcmd);
         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
         return(-1);
      }     
 
      if (strcmp(ma.caps[MANAGE_CAP].v, manage->master_cap.v) != 0) {
-        log_printf(10, "handle_manage: Master cap doesn't match with proxy read: %s actual: %s  rid=%s ns=%d\n", 
+        log_printf(10, "handle_manage: Master cap doesn't match with alias read: %s actual: %s  rid=%s ns=%d\n", 
              manage->master_cap.v, ma.caps[MANAGE_CAP].v, r->name, ns_getid(task->ns));
         alog_append_manage_bad(task->myid, cmd->command, manage->subcmd);
         send_cmd_result(task, IBP_E_INVALID_MANAGE_CAP);
@@ -908,8 +1014,10 @@ int handle_manage(ibp_task_t *task)
            err = IBP_OK;
            if (manage->captype == READ_CAP) {
               a->read_refcount = a->read_refcount + dir;
+              if (a->read_refcount < 0) a->read_refcount = 0;
            } else if (manage->captype == WRITE_CAP) {
               a->write_refcount = a->write_refcount + dir;
+              if (a->write_refcount < 0) a->write_refcount = 0;
            } else {
              log_printf(0, "handle_manage: Invalid captype foe IBP_INCR/DECR!\n");
              err = IBP_E_WRONG_CAP_FORMAT;
@@ -918,20 +1026,20 @@ int handle_manage(ibp_task_t *task)
            if (tq != NULL) {
               task_unlock(task->tc, tq, 1);
               tq = NULL;
-           } else if (a->read_refcount != 0) {   
+           } else if ((a->read_refcount > 0) || (a->write_refcount > 0)) {   
               if ((err = modify_allocation_resource(r, a->id, a)) == 0) err = IBP_OK;              
            }
 
            //** Check if we need to remove the allocation **
-           if (a->read_refcount == 0) {   
+           if ((a->read_refcount == 0) && (a->write_refcount == 0)) {   
               remove_allocation_resource(r, a);
            }
            send_cmd_result(task, err);
            break;
         case IBP_CHNG:
-           if (is_proxy) {  //** If this is an IBP_PROXY_MANAGE call we have different fields
-             a->proxy_offset = manage->offset;
-             a->proxy_size = manage->new_size;
+           if (is_alias) {  //** If this is an IBP_ALIAS_MANAGE call we have different fields
+             a->alias_offset = manage->offset;
+             a->alias_size = manage->new_size;
              
              if (manage->new_duration == INT_MAX) manage->new_duration = time(NULL) + r->max_duration;
              if (manage->new_duration > (time(NULL)+r->max_duration)) {
@@ -941,7 +1049,7 @@ int handle_manage(ibp_task_t *task)
 
              if (manage->new_duration == 0) { //** Inherit duration from master allocation
                 if ((err = get_allocation_resource(r, a->id, &ma)) != 0) {
-                  log_printf(10, "handle_manage: Invalid proxy id: " LU " rid=%s\n", id, r->name);
+                  log_printf(10, "handle_manage: Invalid alias id: " LU " rid=%s\n", id, r->name);
                   manage->new_duration = a->expiration;
                 } else {
                   manage->new_duration = ma.expiration;
@@ -949,7 +1057,7 @@ int handle_manage(ibp_task_t *task)
              }
              a->expiration = manage->new_duration; 
 
-             alog_append_proxy_manage_change(task->myid, r->rl_index, a->id, a->proxy_offset, a->proxy_size, a->expiration);
+             alog_append_alias_manage_change(task->myid, r->rl_index, a->id, a->alias_offset, a->alias_size, a->expiration);
 
            } else {
              a->max_size = manage->new_size;
@@ -969,10 +1077,10 @@ int handle_manage(ibp_task_t *task)
               tq = NULL;
            } else {
               //** Update the manage timestamp
-              if (is_proxy) {
-                 update_manage_history(r, a->id, &(task->ipadd), cmd->command, manage->subcmd, a->proxy_offset, a->expiration, a->proxy_size, pid);
+              if (is_alias) {
+                 update_manage_history(r, a->id, a->is_alias, &(task->ipadd), cmd->command, manage->subcmd, a->alias_offset, a->expiration, a->alias_size, pid);
               } else {
-                 update_manage_history(r, a->id, &(task->ipadd), cmd->command, manage->subcmd, a->reliability, a->expiration, a->max_size, pid);
+                 update_manage_history(r, a->id, a->is_alias, &(task->ipadd), cmd->command, manage->subcmd, a->reliability, a->expiration, a->max_size, pid);
               }
               err = modify_allocation_resource(r, a->id, a);
            }
@@ -993,33 +1101,31 @@ int handle_manage(ibp_task_t *task)
            if (cmd->command == IBP_MANAGE) {
               alog_append_manage_probe(task->myid, r->rl_index, id);
               log_printf(15, "handle_manage: poffset=" LU " plen=" LU " a->size=" LU " a->max_size=" LU " ns=%d\n", 
-                      proxy_offset, proxy_len, a->size, a->max_size, ns_getid(task->ns));
-              pmax_size = a->max_size - proxy_offset;
-              if (pmax_size > proxy_len) pmax_size = proxy_len;
-              psize = a->size - proxy_offset;
-              if (psize > proxy_len) psize = proxy_len;
+                      alias_offset, alias_len, a->size, a->max_size, ns_getid(task->ns));
+              pmax_size = a->max_size - alias_offset;
+              if (pmax_size > alias_len) pmax_size = alias_len;
+              psize = a->size - alias_offset;
+              if (psize > alias_len) psize = alias_len;
 
               snprintf(buf, sizeof(buf)-1, "%d %d %d " LU " " LU " %ld %d %d \n",
                   IBP_OK, a->read_refcount, a->write_refcount, psize, pmax_size, a->expiration - time(NULL),
                   rel, a->type);
-           } else { //** IBP_PROXY_MANAGE
-              alog_append_proxy_manage_probe(task->myid, r->rl_index, pid, id);
+           } else { //** IBP_ALIAS_MANAGE
+              alog_append_alias_manage_probe(task->myid, r->rl_index, pid, id);
               snprintf(buf, sizeof(buf)-1, "%d %d %d " LU " " LU " %ld \n",
-                  IBP_OK, a->read_refcount, a->write_refcount, a->proxy_offset, a->proxy_size, a->expiration - time(NULL));
+                  IBP_OK, a->read_refcount, a->write_refcount, a->alias_offset, a->alias_size, a->expiration - time(NULL));
 
            }
 
            //** Update the manage timestamp
-           update_manage_history(r, a->id, &(task->ipadd), cmd->command, manage->subcmd, a->reliability, a->expiration, a->max_size, pid);
+           update_manage_history(r, a->id, a->is_alias, &(task->ipadd), cmd->command, manage->subcmd, a->reliability, a->expiration, a->max_size, pid);
            err = modify_allocation_resource(r, a->id, a);
            if (err != 0) {
               log_printf(0, "handle_manage/probe:  Error with modify_allocation_resource for new queue allocation!  err=%d\n", err); 
            }
 
-           Net_timeout_t dt;
-           convert_epoch_time2net(&dt, task->cmd_timeout);
            log_printf(10, "handle_manage: probe results = %s\n",buf);
-           write_netstream(task->ns, buf, strlen(buf), dt);
+           write_netstream_block(task->ns, task->cmd_timeout, buf, strlen(buf));
 
            alog_append_cmd_result(task->myid, IBP_OK);
 
@@ -1063,15 +1169,13 @@ int handle_write(ibp_task_t *task)
   osd_id_t id, pid, aid, apid;
   uint64_t asize_original;
   int err;
-  int is_proxy;
-  size_t proxy_offset, proxy_len, proxy_end;
+  int is_alias;
+  size_t alias_offset, alias_len, alias_end;
   int append_mode = 0;
 
   err = 0;
   
   debug_printf(1, "handle_write: Starting to process command tid=" LU " ns=%d\n", task->tid, task->ns->id);
-
-
 
   task->stat.start = time(NULL);
   task->stat.dir = DIR_IN;
@@ -1095,26 +1199,26 @@ int handle_write(ibp_task_t *task)
   pid = a->id;
   id = 0;
   
-  is_proxy = 0;
-  proxy_offset = 0;
-  proxy_len = a->max_size;
-  if (a->is_proxy == 1) {  //** This is a proxy allocation so load the actual one
+  is_alias = 0;
+  alias_offset = 0;
+  alias_len = a->max_size;
+  if (a->is_alias == 1) {  //** This is a alias allocation so load the actual one
      pa = *a;
-     id = a->proxy_id;
+     id = a->alias_id;
 
      apid = pid; aid = id;
 
-     proxy_offset = a->proxy_offset;
-     proxy_len =  a->proxy_size;
+     alias_offset = a->alias_offset;
+     alias_len =  a->alias_size;
 
      if ((err = get_allocation_resource(w->r, id, a)) != 0) {
         alog_append_write(task->myid, cmd->command, w->r->rl_index, pid, id, w->offset, w->len);
-        log_printf(10, "handle_write: Invalid proxy_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, w->r->name,task->tid, ns_getid(task->ns));
+        log_printf(10, "handle_write: Invalid alias_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, w->r->name,task->tid, ns_getid(task->ns));
         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
         return(-1);
      }
 
-     if (proxy_len == 0) proxy_len = a->max_size - proxy_offset;
+     if (alias_len == 0) alias_len = a->max_size - alias_offset;
   } else {
     apid = 0; aid = pid;
   }
@@ -1129,26 +1233,26 @@ int handle_write(ibp_task_t *task)
 
   alog_append_write(task->myid, cmd->command, w->r->rl_index, apid, aid, w->offset, w->len);
 
-  //** Can only append if the proxy allocation is for the whole allocation
-  if ((append_mode == 1) && (proxy_offset != 0) && (proxy_len != 0)) {
-     log_printf(10, "handle_write: Attempt to append to an allocation with a proxy cap without full access! cap: %s r = %s off=" LU " len=" LU "  tid=" LU "\n", w->cap.v, w->r->name, w->offset, w->len, task->tid);
+  //** Can only append if the alias allocation is for the whole allocation
+  if ((append_mode == 1) && (alias_offset != 0) && (alias_len != 0)) {
+     log_printf(10, "handle_write: Attempt to append to an allocation with a alias cap without full access! cap: %s r = %s off=" LU " len=" LU "  tid=" LU "\n", w->cap.v, w->r->name, w->offset, w->len, task->tid);
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(-1);
 
   }
 
-  w->offset = w->offset + proxy_offset;
+  w->offset = w->offset + alias_offset;
   if (((w->offset+ w->len) > a->max_size) && (a->type == IBP_BYTEARRAY)) {
      log_printf(10, "handle_write: Attempt to write beyond end of allocation! cap: %s r = %s off=" LU " len=" LU "  tid=" LU "\n", w->cap.v, w->r->name, w->offset, w->len, task->tid);
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(-1);
   }
 
-  //** check if we are inside the proxy bounds
-  proxy_end = proxy_offset + proxy_len;
-  if (((w->offset+ w->len) > proxy_end) && (a->type == IBP_BYTEARRAY)) {
-     log_printf(10, "handle_write: Attempt to write beyond end of proxy range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
-              w->cap.v, w->r->name, w->offset, w->len, proxy_offset, proxy_len, task->tid);
+  //** check if we are inside the alias bounds
+  alias_end = alias_offset + alias_len;
+  if (((w->offset+ w->len) > alias_end) && (a->type == IBP_BYTEARRAY)) {
+     log_printf(10, "handle_write: Attempt to write beyond end of alias range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
+              w->cap.v, w->r->name, w->offset, w->len, alias_offset, alias_len, task->tid);
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(-1);
   }
@@ -1164,7 +1268,7 @@ int handle_write(ibp_task_t *task)
      err = 0;
      while (err == 0) {
         log_printf(20, "handle_write: a->w_pos=" LU " w->left=" LU " ns=%d\n", a->w_pos, w->left, task->ns->id);
-        err = write_to_disk(task, a);
+        err = write_to_disk(task, a, &(w->left), w->r);
         if (err == 0) {
            if (time(NULL) > task->cmd_timeout) {
               log_printf(15, "handle_write: EXPIRED command!  ctime=" TT " to=" TT "\n", time(NULL), task->cmd_timeout);
@@ -1178,7 +1282,7 @@ int handle_write(ibp_task_t *task)
 
   int bufsize = 128;
   char buffer[bufsize];
-  Net_timeout_t dt;
+
   if (err == -1) {  //** Dead connection
      log_printf(10, "handle_write:  Disk error occured! ns=%d\n", task->ns->id);
      close_netstream(task->ns);
@@ -1187,7 +1291,7 @@ int handle_write(ibp_task_t *task)
      lock_osd_id(a->id);
 
      //** Update the write timestamp
-     update_write_history(w->r, a->id, &(task->ipadd), w->offset, w->len, pid);
+     update_write_history(w->r, a->id, a->is_alias, &(task->ipadd), w->offset, w->len, pid);
 
      err = get_allocation_resource(w->r, a->id, &a_final);
      log_printf(15, "handle_write: ns=%d a->size=" LU " db_size=" LU "\n", task->ns->id, a->size, a_final.size);
@@ -1216,8 +1320,7 @@ int handle_write(ibp_task_t *task)
      }
  
      log_printf(10, "handle_write:  ns=%d Sending result: %s\n", task->ns->id, buffer);
-     convert_epoch_time2net(&dt, task->cmd_timeout);
-     write_netstream(task->ns, buffer, strlen(buffer), dt);
+     write_netstream_block(task->ns, task->cmd_timeout, buffer, strlen(buffer));
   } 
 
   log_printf(10, "handle_write: Exiting write tid=" LU "\n", task->tid);
@@ -1240,8 +1343,8 @@ int handle_read(ibp_task_t *task)
   Allocation_t *a = &(r->a);
   int err;
   osd_id_t id, pid;
-  int is_proxy;
-  size_t proxy_offset, proxy_len, proxy_end;
+  int is_alias;
+  size_t alias_offset, alias_len, alias_end;
 
   err = 0;
 
@@ -1267,22 +1370,25 @@ int handle_read(ibp_task_t *task)
   }
 
   pid = a->id;
-  is_proxy = 0;
-  proxy_offset = 0;
-  proxy_len = a->max_size;
-  if (a->is_proxy == 1) {  //** This is a proxy allocation so load the actual one
-     id = a->proxy_id;
-     proxy_offset = a->proxy_offset;
-     proxy_len =  a->proxy_size;
+  is_alias = 0;
+  alias_offset = 0;
+  alias_len = a->max_size;
+log_printf(10, "handle_read: id: " LU " is_alias=%d cmd offset=" OT " ns=%d\n", a->id, a->is_alias, r->offset, ns_getid(task->ns));
+
+  if (a->is_alias == 1) {  //** This is a alias allocation so load the actual one
+     id = a->alias_id;
+     alias_offset = a->alias_offset;
+     alias_len =  a->alias_size;
+log_printf(10, "handle_read: mid: " LU " offset=" ST " len=" ST " ns=%d\n", id, alias_offset, alias_len, ns_getid(task->ns));
 
      if ((err = get_allocation_resource(r->r, id, a)) != 0) {
-        log_printf(10, "handle_read: Invalid proxy_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, r->r->name,task->tid, ns_getid(task->ns));
+        log_printf(10, "handle_read: Invalid alias_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, r->r->name,task->tid, ns_getid(task->ns));
         alog_append_read(task->myid, r->r->rl_index, pid, id, r->offset, r->len);
         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
         return(-1);
      }
 
-     if (proxy_len == 0) proxy_len = a->max_size - proxy_offset;
+     if (alias_len == 0) alias_len = a->max_size - alias_offset;
 
      alog_append_read(task->myid, r->r->rl_index, pid, id, r->offset, r->len);
   } else {
@@ -1290,7 +1396,7 @@ int handle_read(ibp_task_t *task)
   }
 
   //** Validate the reading range **
-  r->offset = r->offset + proxy_offset;
+  r->offset = r->offset + alias_offset;
 
   if (((r->offset+ r->len) > a->max_size) && (a->type ==IBP_BYTEARRAY)) {
      log_printf(10, "handle_read: Attempt to read beyond end of allocation! cap: %s r = %s off=" LU " len=" LU "\n", r->cap.v, r->r->name, r->offset, r->len);
@@ -1298,11 +1404,11 @@ int handle_read(ibp_task_t *task)
      return(0);
   }
 
-  //** check if we are inside the proxy bounds
-  proxy_end = proxy_offset + proxy_len;
-  if (((r->offset+ r->len) > proxy_end) && (a->type == IBP_BYTEARRAY)) {
-     log_printf(10, "handle_read: Attempt to write beyond end of proxy range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
-              r->cap.v, r->r->name, r->offset, r->len, proxy_offset, proxy_len, task->tid);
+  //** check if we are inside the alias bounds
+  alias_end = alias_offset + alias_len;
+  if (((r->offset+ r->len) > alias_end) && (a->type == IBP_BYTEARRAY)) {
+     log_printf(10, "handle_read: Attempt to write beyond end of alias range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
+              r->cap.v, r->r->name, r->offset, r->len, alias_offset, alias_len, task->tid);
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(-1);
   }
@@ -1323,18 +1429,16 @@ int handle_read(ibp_task_t *task)
   }
 
   char buffer[1024];
-  Net_timeout_t dt;
   snprintf(buffer, sizeof(buffer)-1, "%d " LU " \n", IBP_OK, r->len);
-  convert_epoch_time2net(&dt, task->cmd_timeout);
   log_printf(15, "handle_read: response=%s\n", buffer);
-  write_netstream(task->ns, buffer, strlen(buffer), dt);
+  write_netstream_block(task->ns, task->cmd_timeout, buffer, strlen(buffer));
   
 
   if (a->type == IBP_BYTEARRAY) {
      err = 0;
      while (err == 0) {
         log_printf(20, "handle_read: a->r_pos=" LU " r->left=" LU " ns=%d\n", a->r_pos, r->left, task->ns->id);
-        err = read_from_disk(task, a);
+        err = read_from_disk(task, a, &(r->left), r->r);
         if (err == 0) {
            if (time(NULL) > task->cmd_timeout) {
               log_printf(15, "handle_read: EXPIRED command!  ctime=" TT " to=" TT "\n", time(NULL), task->cmd_timeout);
@@ -1347,7 +1451,7 @@ int handle_read(ibp_task_t *task)
 
   //** Update the read timestamp
   lock_osd_id(a->id);
-  update_read_history(r->r, a->id, &(task->ipadd), r->offset, r->len, pid);
+  update_read_history(r->r, a->id, a->is_alias, &(task->ipadd), r->offset, r->len, pid);
   unlock_osd_id(a->id);
 
   add_stat(&(task->stat));
@@ -1367,30 +1471,32 @@ int handle_read(ibp_task_t *task)
 
 //*****************************************************************
 // same_depot_copy - Makes a same depot-depot copy
-//     if dest_offset < 0 then the data is appended
+//     if rem_offset < 0 then the data is appended
 //*****************************************************************
 
-int same_depot_copy(ibp_task_t *task, char *dest_cap, int dest_offset, osd_id_t rpid)
+int same_depot_copy(ibp_task_t *task, char *rem_cap, int rem_offset, osd_id_t rpid)
 {
    Cmd_state_t *cmd = &(task->cmd); 
    Cmd_read_t *r = &(cmd->cargs.read);
    Allocation_t *a = &(r->a);
-   int proxy_end;
+   int alias_end, cmode;
    int err, finished;
-   Resource_t *dest_r;
-   Allocation_t dest_a;
+   Resource_t *rem_r, *src_r, *dest_r;
+   Allocation_t rem_a;
+   Allocation_t *src_a, *dest_a;
    osd_id_t wpid, did;
    char dcrid[128]; 
    char *bstate;
    RID_t drid;
    Cap_t dcap;
 
-  log_printf(10, "same_depot_copy: Starting to process command ns=%d dest_cap=%s\n", task->ns->id, dest_cap);
+   log_printf(10, "same_depot_copy: Starting to process command ns=%d rem_cap=%s\n", task->ns->id, rem_cap);
+   alias_end = -1;
    
-   //** Get the RID, uh I mean the key...... the format is RID#key
+   //** Get the RID and key...... the format is RID#key
    char *tmp;
    dcrid[sizeof(dcrid)-1] = '\0'; 
-   tmp = string_token(dest_cap, "#", &bstate, &finished);
+   tmp = string_token(rem_cap, "#", &bstate, &finished);
    if (str2rid(tmp, &(drid)) != 0) {
       log_printf(1, "same_depot_copy: Bad RID: %s\n", tmp);
       send_cmd_result(task, IBP_E_INVALID_RID);                
@@ -1402,97 +1508,113 @@ int same_depot_copy(ibp_task_t *task, char *dest_cap, int dest_offset, osd_id_t 
    //** Get the write key
    dcap.v[sizeof(dcap.v)-1] = '\0';
    strncpy(dcap.v, string_token(NULL, " ", &bstate, &finished), sizeof(dcap.v)-1);
-   debug_printf(10, "same_depot_copy: dest cap=%s\n", dcap.v);
+   debug_printf(10, "same_depot_copy: remote_cap=%s\n", dcap.v);
 
    debug_printf(10, "same_depot_copy: RID=%s\n", dcrid);
 
-   dest_r = resource_lookup(global_config->rl, dcrid);
-   if (dest_r == NULL) {
+   rem_r = resource_lookup(global_config->rl, dcrid);
+   if (rem_r == NULL) {
       log_printf(10, "same_depot_copy:  Invalid RID :%s\n",dcrid); 
       send_cmd_result(task, IBP_E_INVALID_RID);
       return(0);
    }
 
-   if ((err = get_allocation_by_cap_resource(dest_r, WRITE_CAP, &(dcap), &dest_a)) != 0) {
-      log_printf(10, "same_depot_copy: Invalid destcap: %s for resource = %s\n", dcap.v, dest_r->name);
+   cmode = WRITE_CAP;
+   if (cmd->command == IBP_PULL) cmode = READ_CAP;
+
+   if ((err = get_allocation_by_cap_resource(rem_r, cmode, &(dcap), &rem_a)) != 0) {
+      log_printf(10, "same_depot_copy: Invalid destcap: %s for resource = %s\n", dcap.v, rem_r->name);
       send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
       return(0);
    }
 
-   wpid = dest_a.id;
-   did = dest_a.id;
+   wpid = rem_a.id;
+   did = rem_a.id;
 
-   //*** Proxy cap so load the master **
-   if (dest_a.is_proxy) {
-      if ((dest_a.proxy_offset > 0) && (dest_offset < 0)) {  //** This is an append but the proxy can't do it
-         log_printf(10, "same_depot_copy: destcap: %s on resource = %s is a proxy with offset=" LU "\n", dcap.v, dest_r->name, dest_a.proxy_offset);
+   //*** ALIAS cap so load the master **
+   if (rem_a.is_alias) {
+      if ((rem_a.alias_offset > 0) && (rem_offset < 0)) {  //** This is an append but the alias can't do it
+         log_printf(10, "same_depot_copy: destcap: %s on resource = %s is a alias with offset=" LU "\n", dcap.v, rem_r->name, rem_a.alias_offset);
          send_cmd_result(task, IBP_E_CAP_ACCESS_DENIED);
          return(0);
       }
 
-      dest_offset = dest_offset + dest_a.proxy_offset;  //** Tweak the offset based on the proxy bounds
-      proxy_end = dest_offset + r->len;
-      //** Validate the proxy writing range **
-      if (((dest_offset + r->len) > proxy_end) && (dest_a.type ==IBP_BYTEARRAY)) {
-         log_printf(10, "same_depot_copy: Attempt to write beyond end of proxy allocation! cap: %s r = %s off=%d len=" LU "\n", 
-             dcap.v, dest_r->name, dest_offset, r->len);
-         send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
-         return(0);
-      }
-
-      did = dest_a.proxy_id;
+      alias_end = rem_a.alias_offset + rem_a.alias_size;
+      did = rem_a.alias_id;
    }
 
    lock_osd_id(did);
 
    //*** Now get the true allocation ***
-   if ((err = get_allocation_resource(dest_r, did, &dest_a)) != 0) {
-      log_printf(10, "same_depot_copy: Invalid destcap: %s for resource = %s\n", dcap.v, dest_r->name);
+   if ((err = get_allocation_resource(rem_r, did, &rem_a)) != 0) {
+      log_printf(10, "same_depot_copy: Invalid destcap: %s for resource = %s\n", dcap.v, rem_r->name);
       send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
       unlock_osd_id(did);
       return(0);
    }
 
-   if (dest_offset < 0) {  //*** This is an append operation
-      dest_offset = dest_a.size;
+   if (rem_offset < 0) rem_offset = rem_a.size;  //** This is an append copy
+
+   if (rem_a.is_alias) {
+      rem_offset = rem_offset + rem_a.alias_offset;  //** Tweak the offset based on the alias bounds
+
+      //** Validate the alias writing range **
+      if (((rem_offset + r->len) > alias_end) && (rem_a.type ==IBP_BYTEARRAY)) {
+         log_printf(10, "same_depot_copy: Attempt to write beyond end of alias allocation! cap: %s r = %s off=%d len=" LU "\n", 
+             dcap.v, rem_r->name, rem_offset, r->len);
+         send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
+         unlock_osd_id(did);
+         return(0);
+      }
+
    }
 
-   //** Validate the writing range **
-   if (((dest_offset + r->len) > dest_a.max_size) && (dest_a.type ==IBP_BYTEARRAY)) {
+   //** Validate the writing/reading range **
+   if (((rem_offset + r->len) > rem_a.max_size) && (rem_a.type ==IBP_BYTEARRAY)) {
       log_printf(10, "same_depot_copy: Attempt to write beyond end of allocation! cap: %s r = %s off=%d len=" LU "\n", 
-          dcap.v, dest_r->name, dest_offset, r->len);
+          dcap.v, rem_r->name, rem_offset, r->len);
       send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
       unlock_osd_id(did);
       return(0);
    }
 
+   unlock_osd_id(did);
 
    //*** Now do the copy ***
    const int bufsize = 1048576;
    char buffer[bufsize];
-   int soff, doff, nbytes, i, nleft;
-   doff = dest_offset;
-   soff = r->offset;
+   int soff, doff, nbytes, i, nleft, src_off, dest_off;
+   osd_id_t spid, dpid; 
    nleft = r->len;
+   if (r->transfer_dir == IBP_PULL) {
+      src_a = &rem_a;   src_r = rem_r;  soff = rem_offset;  spid = wpid;
+      dest_a = a;       dest_r = r->r;  doff = r->offset;   dpid = rpid;
+   } else {
+      src_a = a;        src_r = r->r;   soff = r->offset;   spid = rpid;
+      dest_a = &rem_a;  dest_r = rem_r; doff = rem_offset;  dpid = wpid;
+   }
+   src_off = soff; dest_off = doff;
+
+log_printf(15, "same_depot_Copy: rem_offset=%d r->offset=" OT " ns=%d\n", rem_offset, r->offset, ns_getid(task->ns));
    for (i=0; i<r->len; i=i+bufsize) {
      nbytes = (nleft > bufsize) ? bufsize : nleft;
      nleft = nleft - bufsize;
-     err = read_allocation_with_id(r->r, a->id, soff, nbytes, buffer);
+     err = read_allocation_with_id(src_r, src_a->id, soff, nbytes, buffer);
      if (err != 0) {
         char tmp[128];
         log_printf(0, "same_depot_copy: Error with read_allocation(%s, " LU ", %d, %d, buffer) = %d\n",
-             rid2str(&(r->r->rid), tmp, sizeof(tmp)), a->id, soff, nbytes, err); 
+             rid2str(&(src_r->rid), tmp, sizeof(tmp)), src_a->id, soff, nbytes, err); 
         send_cmd_result(task, IBP_E_FILE_READ);
         cmd->state = CMD_STATE_FINISHED;
         unlock_osd_id(did);
         return(0);
      }
 
-     err = write_allocation_with_id(dest_r, dest_a.id, doff, nbytes, buffer);
+     err = write_allocation_with_id(dest_r, dest_a->id, doff, nbytes, buffer);
      if (err != 0) {
         char tmp[128];
         log_printf(0, "same_depot_copy: Error with write_allocation(%s, " LU ", %d, %d, buffer) = %d  tid=" LU "\n",
-                rid2str(&(dest_r->rid), tmp, sizeof(tmp)), dest_a.id, doff, nbytes, err, task->tid); 
+                rid2str(&(dest_r->rid), tmp, sizeof(tmp)), dest_a->id, doff, nbytes, err, task->tid); 
         send_cmd_result(task, IBP_E_FILE_WRITE);
         unlock_osd_id(did);
         return(0);
@@ -1503,39 +1625,36 @@ int same_depot_copy(ibp_task_t *task, char *dest_cap, int dest_offset, osd_id_t 
    } 
 
    char result[512];
-   Net_timeout_t dt;
-
    result[511] = '\0';
 
    //** update the dest write history 
-   update_write_history(dest_r, dest_a.id, &(task->ipadd), r->offset, r->len, wpid);
+   update_write_history(dest_r, dest_a->id, dest_a->is_alias, &(task->ipadd), dest_off, r->len, dpid);
 
    //** Update the amount of data written if needed
-   err = get_allocation_resource(dest_r, did, &dest_a);
-   log_printf(15, "same_depot_copy: ns=%d dest->size=" LU " doff=%d\n", task->ns->id, dest_a.size, doff);
+   lock_osd_id(dest_a->id);
+   err = get_allocation_resource(dest_r, dest_a->id, &rem_a);
+   log_printf(15, "same_depot_copy: ns=%d dest->size=" LU " doff=%d\n", task->ns->id, rem_a.size, doff);
    if (err == 0) {
-      if (doff > dest_a.size) {
-         dest_a.size = doff;
-         dest_a.w_pos = doff;
-         err = modify_allocation_resource(dest_r, dest_a.id, &dest_a);
+      if (doff > rem_a.size) {
+         rem_a.size = doff;
+         rem_a.w_pos = doff;
+         err = modify_allocation_resource(dest_r, dest_a->id, &rem_a);
          if (err != 0) {
             log_printf(10, "same_depot_copy:  ns=%d ERROR with modify_allocation_resource(%s, " LU ", a)=%d for dest\n", task->ns->id,
-                  dcrid, dest_a.id, err);
+                  dcrid, rem_a.id, err);
             err = IBP_E_INTERNAL;
          }
       }
    } else {
      log_printf(10, "same_depot_copy: ns=%d error with final get_allocation_resource(%s, " LU ", a)=%d for dest\n", task->ns->id,
-           dcrid, dest_a.id, err);
+           dcrid, rem_a.id, err);
      err = IBP_E_INTERNAL;
    }
 
-   unlock_osd_id(dest_a.id);
+   unlock_osd_id(dest_a->id);
 
    //** Now update the timestamp for the read allocation
-   lock_osd_id(a->id);
-   update_write_history(r->r, a->id, &(task->ipadd), r->offset, r->len, rpid);
-   unlock_osd_id(a->id);
+   update_read_history(src_r, src_a->id, src_a->is_alias, &(task->ipadd), src_off, r->len, spid);
 
    if (err != 0) {
       snprintf(result, 511, "%d " LU " \n", err, r->len);
@@ -1544,8 +1663,7 @@ int same_depot_copy(ibp_task_t *task, char *dest_cap, int dest_offset, osd_id_t 
    }
 
    log_printf(10, "same_depot_copy: ns=%d Completed successfully.  Sending result: %s", task->ns->id, result); 
-   convert_epoch_time2net(&dt, task->cmd_timeout);
-   write_netstream(task->ns, result, strlen(result), dt);
+   write_netstream_block(task->ns, task->cmd_timeout, result, strlen(result));
    log_printf(15, "handle_copysend: END pns=%d cns=%d---same_depot_copy-------------------------\n", task->ns->id, task->ns->id);
 
    return(0);
@@ -1564,12 +1682,12 @@ int handle_copy(ibp_task_t *task)
   Cmd_state_t *cmd = &(task->cmd); 
   Cmd_read_t *r = &(cmd->cargs.read);
   Allocation_t *a = &(r->a);
-  char key[sizeof(r->remote_wcap)], typekey[sizeof(r->remote_wcap)];
+  char key[sizeof(r->remote_cap)], typekey[sizeof(r->remote_cap)];
   char addr[16];
-  int err;
+  int err, cmode, i;
   osd_id_t id, rpid, aid, apid;
-  int is_proxy;
-  size_t proxy_offset, proxy_len, proxy_end;
+  int is_alias;
+  size_t alias_offset, alias_len, alias_end;
   phoebus_t ppath;
 
   memset(addr, 0, sizeof(addr));
@@ -1585,14 +1703,19 @@ int handle_copy(ibp_task_t *task)
   r->r = resource_lookup(global_config->rl, r->crid);
   if (r->r == NULL) {
      log_printf(10, "handle_read:  Invalid RID :%s\n",r->crid); 
-     alog_append_dd_copy_append(task->myid, -1, 0, 0, r->len, 0, AF_INET, addr, r->remote_wcap, "");
+     alog_append_dd_copy(cmd->command, task->myid, -1, 0, 0, r->len, 0, 0, r->write_mode, r->ctype, 
+           r->path, 0, AF_INET, addr, r->remote_cap, "");
      send_cmd_result(task, IBP_E_INVALID_RID);
      return(0);
   }
 
-  if ((err = get_allocation_by_cap_resource(r->r, READ_CAP, &(r->cap), a)) != 0) {
+  cmode = READ_CAP;
+  if (cmd->command == IBP_PULL) cmode = WRITE_CAP;
+
+  if ((err = get_allocation_by_cap_resource(r->r, cmode, &(r->cap), a)) != 0) {
      log_printf(10, "handle_copy: Invalid cap: %s for resource = %s\n", r->cap.v, r->r->name);
-     alog_append_dd_copy_append(task->myid, r->r->rl_index, 0, 0, r->len, 0, AF_INET, addr, r->remote_wcap, "");
+     alog_append_dd_copy(cmd->command, task->myid, r->r->rl_index, 0, 0, r->len, 0, 0, r->write_mode, 
+          r->ctype, r->path, 0, AF_INET, addr, r->remote_cap, "");
      send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
      return(0);
   }
@@ -1601,60 +1724,69 @@ int handle_copy(ibp_task_t *task)
   aid = a->id;
   apid = 0;
 
-  is_proxy = 0;
-  proxy_offset = 0;
-  proxy_len = a->max_size;
-  if (a->is_proxy == 1) {  //** This is a proxy allocation so load the actual one
-     id = a->proxy_id;
+  is_alias = 0;
+  alias_offset = 0;
+  alias_len = a->max_size;
+  if (a->is_alias == 1) {  //** This is a alias allocation so load the actual one
+     id = a->alias_id;
      aid = id;
      apid = a->id;
 
-     proxy_offset = a->proxy_offset;
-     proxy_len =  a->proxy_size;
+     alias_offset = a->alias_offset;
+     alias_len =  a->alias_size;
 
      if ((err = get_allocation_resource(r->r, id, a)) != 0) {
-        log_printf(10, "handle_copy: Invalid proxy_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, r->r->name,task->tid, ns_getid(task->ns));
+        log_printf(10, "handle_copy: Invalid alias_id: " LU " for resource = %s  tid=" LU " ns=%d\n", id, r->r->name,task->tid, ns_getid(task->ns));
         send_cmd_result(task, IBP_E_CAP_NOT_FOUND);
         return(-1);
      }
 
-     if (proxy_len == 0) proxy_len = a->max_size - proxy_offset;
+     if (alias_len == 0) alias_len = a->max_size - alias_offset;
   }
 
-  //** Validate the reading range **
-  r->offset = r->offset + proxy_offset;
-  if (((r->offset+ r->len) > a->max_size) && (a->type ==IBP_BYTEARRAY)) {
+  //** Validate the reading or writing range for the local allocation **
+  if ((cmd->command == IBP_PULL) && (r->write_mode == 1)) { 
+     r->offset = a->size;  //** PULL with append
+  } else {
+     r->offset = r->offset + alias_offset;
+  }
+  if (((r->offset + r->len) > a->max_size) && (a->type ==IBP_BYTEARRAY)) {
      log_printf(10, "handle_copy: Attempt to read beyond end of allocation! cap: %s r = %s off=" LU " len=" LU "\n", r->cap.v, r->r->name, r->offset, r->len);
-     alog_append_dd_copy_append(task->myid, r->r->rl_index, apid, aid, r->len, 0, AF_INET, addr, r->remote_wcap, "");
+     alog_append_dd_copy(cmd->command, task->myid, r->r->rl_index, apid, aid, r->len, r->offset, 
+           r->remote_offset, r->write_mode, r->ctype, r->path, 0, AF_INET, addr, r->remote_cap, "");
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(0);
   }
 
-  //** check if we are inside the proxy bounds
-  proxy_end = proxy_offset + proxy_len;
-  if (((r->offset+ r->len) > proxy_end) && (a->type == IBP_BYTEARRAY)) {
-     log_printf(10, "handle_copy: Attempt to write beyond end of proxy range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
-              r->cap.v, r->r->name, r->offset, r->len, proxy_offset, proxy_len, task->tid);
-     alog_append_dd_copy_append(task->myid, r->r->rl_index, apid, aid, r->len, 0, AF_INET, addr, r->remote_wcap, "");
+  //** check if we are inside the alias bounds
+  alias_end = alias_offset + alias_len;
+  if (((r->offset + r->len) > alias_end) && (a->type == IBP_BYTEARRAY)) {
+     log_printf(10, "handle_copy: Attempt to write beyond end of alias range! cap: %s r = %s off=" LU " len=" LU " poff = " ST " plen= " ST " tid=" LU "\n", 
+              r->cap.v, r->r->name, r->offset, r->len, alias_offset, alias_len, task->tid);
+     alog_append_dd_copy(cmd->command, task->myid, r->r->rl_index, apid, aid, r->len, r->offset, 
+           r->remote_offset, r->write_mode, r->ctype, r->path, 0, AF_INET, addr, r->remote_cap, "");
      send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
      return(-1);
   }
 
 
-  //*** and make sure there is data ***
-  if (((r->offset + r->len) > a->size) && (a->type ==IBP_BYTEARRAY)) {
-     log_printf(10, "handle_copy: Not enough data! cap: %s r = %s off=" LU " alen=" LU " curr_size=" LU "\n", 
-            r->cap.v, r->r->name, r->offset, r->len, a->size);
-     alog_append_dd_copy_append(task->myid, r->r->rl_index, apid, aid, r->len, 0, AF_INET, addr, r->remote_wcap, "");
-     send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
-     return(0);
+  //*** and make sure there is data for PUSH commands***
+  if (r->transfer_dir == IBP_PUSH) {
+     if (((r->offset + r->len) > a->size) && (a->type ==IBP_BYTEARRAY)) {
+        log_printf(10, "handle_copy: Not enough data! cap: %s r = %s off=" LU " alen=" LU " curr_size=" LU "\n", 
+              r->cap.v, r->r->name, r->offset, r->len, a->size);
+        alog_append_dd_copy(cmd->command, task->myid, r->r->rl_index, apid, aid, r->len, 
+              r->offset, r->remote_offset, r->write_mode, r->ctype, r->path, 0, AF_INET, addr, r->remote_cap, "");
+        send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
+        return(0);
+     }
   }
 
   //*** Parse the remote cap for the host/port
   int fin, rport;
   char *bstate;
   char *rhost;
-  char *temp = strdup(r->remote_wcap);
+  char *temp = strdup(r->remote_cap);
   rhost = string_token(temp, "/", &bstate, &fin); //** gets the ibp:/
   rhost = string_token(NULL, ":", &bstate, &fin); //** This should be the host name
   rhost = &(rhost[1]);  //** Skip the extra "/"
@@ -1663,15 +1795,18 @@ int handle_copy(ibp_task_t *task)
   strncpy(typekey, string_token(NULL, "/", &bstate, &fin), sizeof(typekey)-1); typekey[sizeof(typekey)-1] = '\0';
 
   lookup_host(rhost, addr);
-  alog_append_dd_copy_append(task->myid, r->r->rl_index, apid, aid, r->len, rport, AF_INET, addr, key, typekey);
+  alog_append_dd_copy(cmd->command, task->myid, r->r->rl_index, apid, aid, r->len, 
+       r->offset, r->remote_offset, r->write_mode, r->ctype, r->path, rport, AF_INET, addr, key, typekey);
     
-  log_printf(15, "handle_copy: rhost=%s rport=%d cap=%s key=%s typekey=%s\n", rhost, rport, r->remote_wcap, key, typekey);
+  log_printf(15, "handle_copy: rhost=%s rport=%d cap=%s key=%s typekey=%s\n", rhost, rport, r->remote_cap, key, typekey);
 
   //** check if it's a copy to myself
-  if ((strcmp(rhost, global_config->server.hostname) == 0) && (rport == global_config->server.port)) {
-     err = same_depot_copy(task, key, -1, rpid);
-     free(temp);
-     return(err);
+  for (i=0; i<global_config->server.n_iface; i++) {
+     if ((strcmp(rhost, global_config->server.iface[i].hostname) == 0) && (rport == global_config->server.iface[i].port)) {
+        err = same_depot_copy(task, key, r->remote_offset, rpid);
+        free(temp);
+        return(err);
+     }
   }
   
   //** Make the connection
@@ -1683,7 +1818,7 @@ int handle_copy(ibp_task_t *task)
   set_net_timeout(&tm, to, 0);
   ppath.p_count = 0;
 
-  if (task->cmd.command == IBP_PHOEBUS_SEND) {
+  if (r->ctype  == IBP_PHOEBUS) {
      if (r->path[0] == '\0') {
         log_printf(5, "handle_copy: using default phoebus path to %s:%d\n", rhost, rport);
         ns_config_phoebus(ns, NULL, 0);
@@ -1705,7 +1840,7 @@ int handle_copy(ibp_task_t *task)
   }
 
   //** Send the data
-  err = handle_send(task, rpid, ns, key, typekey);
+  err = handle_transfer(task, rpid, ns, key, typekey);
 
   log_printf(10, "handle_copy: End of routine Remote host:%s:%d ns=%d\n", rhost, rport, task->ns->id);
 
@@ -1717,24 +1852,39 @@ int handle_copy(ibp_task_t *task)
 }
 
 //*****************************************************************
-//  handle_send  - Handles the actual transfer for the IBP_SEND command
+//  handle_transfer  - Handles the actual transfer
 //*****************************************************************
 
-int handle_send(ibp_task_t *task, osd_id_t rpid, NetStream_t *ns, const char *key, const char *typekey)
+int handle_transfer(ibp_task_t *task, osd_id_t rpid, NetStream_t *ns, const char *key, const char *typekey)
 {
   Cmd_state_t *cmd = &(task->cmd); 
   Cmd_read_t *r = &(cmd->cargs.read);
   Allocation_t *a = &(r->a);
+  Allocation_t a_final;
+  char *bstate;
   int err, myid;
+  int fin;
+  long long unsigned int llu;
   char write_cmd[1024];
 
   myid = task->ns->id;
 
-  log_printf(10, "handle_send: Starting to process command ns=%d\n", task->ns->id);
+  log_printf(10, "handle_transfer: Starting to process command ns=%d\n", task->ns->id);
 
   int rto = r->remote_sto;
   int rlen = r->len;
-  snprintf(write_cmd, 1024, "%d %d %s %s %d %d \n", IBPv040, IBP_STORE, key, typekey, rlen, rto);
+  switch (r->transfer_dir) {
+    case IBP_PUSH:
+       if (r->write_mode == 1) {
+          snprintf(write_cmd, 1024, "%d %d %s %s %d %d \n", IBPv040, IBP_STORE, key, typekey, rlen, rto);
+       } else {
+          snprintf(write_cmd, 1024, "%d %d %s %s " OT " %d %d \n", IBPv040, IBP_WRITE, key, typekey, r->remote_offset, rlen, rto);
+       }
+       break;
+    case IBP_PULL:
+       snprintf(write_cmd, 1024, "%d %d %s %s " OT " %d %d \n", IBPv040, IBP_LOAD, key, typekey, r->remote_offset, rlen, rto);
+       break;
+  }
   log_printf(15, "handle_send: ns=%d sending command: %s", task->ns->id, write_cmd);
   write_cmd[1023] = '\0';
 
@@ -1757,17 +1907,24 @@ log_printf(15, "handle_send: ns=%d AAAAAAAAAAAAAAAAAAAA\n", task->ns->id);
   } else if (write_cmd[strlen(write_cmd)-1] == '\n') {  //** Got a complete line
      log_printf(15, "handle_send: ns=%d BBBBBBBBBBBBB response=%s\n", task->ns->id, write_cmd);
      err = 0;
-     sscanf(write_cmd, "%d \n", &err);
+     sscanf(string_token(write_cmd, " ", &bstate, &fin), "%d", &err);
      if (err != IBP_OK) {  //** Got an error 
-        log_printf(10, "handle_send:  Response had an error remote_ns=%d  Error=%d\n", ns_getid(ns), err);
+        log_printf(10, "handle_transfer:  Response had an error remote_ns=%d  Error=%d\n", ns_getid(ns), err);
         send_cmd_result(task, err);
         close_netstream(ns);
         return(0);
      }
-
+     if (r->transfer_dir == IBP_PULL) { //** Check the nbytes
+        sscanf(string_token(NULL, " ", &bstate, &fin), "%llu", &llu);
+        if (llu != r->len) {  //** Not enoughpbytes
+           log_printf(10, "handle_transfer:  Not enough bytes! remote_ns=%d  nbytes=%llu\n", ns_getid(ns), llu);
+           send_cmd_result(task, IBP_E_WOULD_EXCEED_LIMIT);
+           close_netstream(ns);
+           return(0);
+        }
+     }
   }     
 
-  r->pos = r->offset;
   r->left = r->len;
 
   log_printf(15, "handle_send: ns=%d rns=%dCCCCCCCCCCCCCCCCCCCCCC\n", ns_getid(task->ns), ns_getid(ns));
@@ -1775,9 +1932,19 @@ log_printf(15, "handle_send: ns=%d AAAAAAAAAAAAAAAAAAAA\n", task->ns->id);
   //** For the send copy the remote ns into the task
   NetStream_t *pns = task->ns;
   task->ns = ns;
-  err = read_from_disk(task, a);
+  if (r->transfer_dir == IBP_PUSH) {
+     a->r_pos = r->offset;
+     err = read_from_disk(task, a, &(r->left), r->r);
+  } else {
+     a->w_pos = r->offset;
+     err = write_to_disk(task, a, &(r->left), r->r);
+  }
   while (err == 0) {
-     err = read_from_disk(task, a);
+     if (r->transfer_dir == IBP_PUSH) {
+        err = read_from_disk(task, a, &(r->left), r->r);
+     } else {
+        err = write_to_disk(task, a, &(r->left), r->r);
+     }
      if (err == 0) {
         if (time(NULL) > (task->cmd_timeout - 1)) err = -1;
      }
@@ -1812,7 +1979,31 @@ log_printf(15, "handle_send: ns=%d AAAAAAAAAAAAAAAAAAAA\n", task->ns->id);
 
      //** Update the read timestamp
      lock_osd_id(a->id);
-     update_read_history(r->r, a->id, &(task->ipadd), r->offset, r->len, rpid);
+     if (r->transfer_dir == IBP_PUSH) {
+        update_read_history(r->r, a->id, a->is_alias, &(task->ipadd), r->offset, r->len, rpid);
+     } else {     //** And also the size if needed
+        update_write_history(r->r, a->id, a->is_alias, &(task->ipadd), r->offset, r->len, rpid);
+
+        err = get_allocation_resource(r->r, a->id, &a_final);
+        log_printf(15, "handle_transfer: ns=%d a->size=" LU " db_size=" LU "\n", task->ns->id, a->size, a_final.size);
+        if (err == 0) {
+           if (a->size > a_final.size ) {
+              a_final.size = a->size;
+              if (a->type == IBP_BYTEARRAY) a->size = a->w_pos; 
+
+              err = modify_allocation_resource(r->r, a->id, &a_final);
+              if (err != 0) {
+                 log_printf(10, "handle_write:  ns=%d ERROR with modify_allocation_resource(%s, " LU ", a)=%d\n",
+                       task->ns->id, r->crid, a->id, err);
+                 err = IBP_E_INTERNAL;
+              }
+           }
+        } else {
+           log_printf(10, "handle_write: ns=%d error with final get_allocation_resource(%s, " LU ", a)=%d\n", task->ns->id,
+                r->r->name, a->id, err);
+           if (err != 0) err = IBP_E_INTERNAL;
+        }
+     }
      unlock_osd_id(a->id);
    } else {  //** Error!!!
      log_printf(0, "handle_send:  Invalid result from read_from_disk!!!! err=%d\n", err);
@@ -1841,11 +2032,8 @@ int handle_internal_date_free(ibp_task_t *task)
   walk_expire_iterator_t *wei;
   Resource_t *r;
   char text[512];
-  Net_timeout_t dt;
 
   log_printf(5, "handle_internal_date_free: Start of routine.  ns=%d size= " LU "\n",ns_getid(task->ns), arg->size);
-
-  set_net_timeout(&dt, 3, 0);
 
   r = resource_lookup(global_config->rl, arg->crid);
   if (r == NULL) {
@@ -1872,7 +2060,7 @@ int handle_internal_date_free(ibp_task_t *task)
        if (curr_time != 0) {
           sprintf(text, TT " %d %d " LU " " LU "\n", curr_time, a_count, p_count, bytes_used, bytes);
           log_printf(10, "handle_internal_date_free:  ns=%d sending %s", ns_getid(task->ns), text);
-          err = write_netstream(task->ns, text, strlen(text), dt);
+          err = write_netstream_block(task->ns, task->cmd_timeout, text, strlen(text));
           if (err != strlen(text)) {
              log_printf(10, "handle_internal_date_free:  ns=%d erro with write_netstream=%d\n", ns_getid(task->ns), err);
           } else {
@@ -1884,7 +2072,7 @@ int handle_internal_date_free(ibp_task_t *task)
        a_count = p_count = bytes = bytes_used = 0;
     } 
 
-    if (a.is_proxy) { 
+    if (a.is_alias) { 
        p_count++;
     } else {
        a_count++;
@@ -1902,7 +2090,7 @@ int handle_internal_date_free(ibp_task_t *task)
   if (curr_time != 0) {
      sprintf(text, TT " %d %d " LU " " LU "\n", curr_time, a_count, p_count, bytes_used, bytes);
      log_printf(10, "handle_internal_date_free:  ns=%d sending %s", ns_getid(task->ns), text);
-     err = write_netstream(task->ns, text, strlen(text), dt);
+     err = write_netstream_block(task->ns, task->cmd_timeout, text, strlen(text));
      if (err != strlen(text)) {
         log_printf(10, "handle_internal_date_free:  ns=%d erro with write_netstream=%d\n", ns_getid(task->ns), err);
      }
@@ -1911,7 +2099,7 @@ int handle_internal_date_free(ibp_task_t *task)
   walk_expire_iterator_end(wei);
 
   //**send the terminator
-  err = write_netstream(task->ns, "END\n", 4, dt);
+  err = write_netstream_block(task->ns, task->cmd_timeout, "END\n", 4);
   if (err == 4) err = 0;
 
   log_printf(5, "handle_internal_date_free: End of routine.  ns=%d error=%d\n",ns_getid(task->ns), err);
@@ -1936,11 +2124,8 @@ int handle_internal_expire_list(ibp_task_t *task)
   walk_expire_iterator_t *wei;
   Resource_t *r;
   char text[512];
-  Net_timeout_t dt;
 
   log_printf(5, "handle_internal_expire_list: Start of routine.  ns=%d time= " TT " count= %d\n",ns_getid(task->ns), arg->start_time, arg->max_rec);
-
-  set_net_timeout(&dt, 3, 0);
 
   r = resource_lookup(global_config->rl, arg->crid);
   if (r == NULL) {
@@ -1965,7 +2150,7 @@ int handle_internal_expire_list(ibp_task_t *task)
     expire_time = a.expiration;
     sprintf(text, TT " " LU " " LU "\n", expire_time, a.id, a.max_size);
     log_printf(10, "handle_internal_expire_list:  ns=%d sending %s", ns_getid(task->ns), text);
-    err = write_netstream(task->ns, text, strlen(text), dt);
+    err = write_netstream_block(task->ns, task->cmd_timeout, text, strlen(text));
     if (err != strlen(text)) {
        log_printf(10, "handle_internal_expire_list:  ns=%d error with write_netstream=%d\n", ns_getid(task->ns), err);
     } else {
@@ -1979,7 +2164,7 @@ int handle_internal_expire_list(ibp_task_t *task)
   walk_expire_iterator_end(wei);
 
   //**send the terminator
-  err = write_netstream(task->ns, "END\n", 4, dt);
+  err = write_netstream_block(task->ns, task->cmd_timeout, "END\n", 4);
   if (err == 4) err = 0;
 
   log_printf(5, "handle_internal_expire_list: End of routine.  ns=%d error=%d\n",ns_getid(task->ns), err);

@@ -53,7 +53,7 @@ int fd_status(int fd);
 int fd_close(int fd);
 long int fd_write(int fd, const void *buf, size_t count, Net_timeout_t tm);
 long int fd_read(int fd, void *buf, size_t count, Net_timeout_t tm);
-int fd_connect(int *fd, char *hostname, int port, int tcpsize, Net_timeout_t timeout);
+int fd_connect(int *fd, const char *hostname, int port, int tcpsize, Net_timeout_t timeout);
 
 #ifdef __cplusplus
 }

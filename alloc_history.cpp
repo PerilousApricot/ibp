@@ -114,12 +114,13 @@ int blank_history(Resource_t *r, osd_id_t id)
 // update_read_history - Updates the read history table for the allocation
 //****************************************************************************
 
-void update_read_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid)
+void update_read_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid)
 {
    Allocation_history_t h;
    int err;
 
    if (r->enable_read_history == 0) return;
+   if ((r->enable_alias_history == 0) && (is_alias == 1)) return;
 
    err = get_history_table(r, id, &h);
    if (err != 0) {
@@ -141,12 +142,13 @@ void update_read_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, 
 // update_write_history - Updates the write history table for the allocation
 //****************************************************************************
 
-void update_write_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid)
+void update_write_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, uint64_t offset, uint64_t size, osd_id_t pid)
 {
    Allocation_history_t h;
    int err;
 
    if (r->enable_write_history == 0) return;
+   if ((r->enable_alias_history == 0) && (is_alias == 1)) return;
 
    err = get_history_table(r, id, &h);
    if (err != 0) {
@@ -169,12 +171,13 @@ void update_write_history(Resource_t *r, osd_id_t id, Allocation_address_t *add,
 // update_manage_history - Updates the manage history table for the allocation
 //****************************************************************************
 
-void update_manage_history(Resource_t *r, osd_id_t id, Allocation_address_t *add, int cmd, int subcmd, int reliability, uint32_t expiration, uint64_t size, osd_id_t pid)
+void update_manage_history(Resource_t *r, osd_id_t id, int is_alias, Allocation_address_t *add, int cmd, int subcmd, int reliability, uint32_t expiration, uint64_t size, osd_id_t pid)
 {
    Allocation_history_t h;
    int err;
 
    if (r->enable_manage_history == 0) return;
+   if ((r->enable_alias_history == 0) && (is_alias == 1)) return;
 
    err = get_history_table(r, id, &h);
    if (err != 0) {

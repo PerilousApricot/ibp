@@ -41,6 +41,10 @@ http://www.accre.vanderbilt.edu
 #include <pthread.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern FILE *_log_fd;
 extern int _log_level;
 extern int _log_maxsize;
@@ -53,7 +57,6 @@ void _close_log();
 
 #define _lock_log() pthread_mutex_lock(&_log_lock)
 #define _unlock_log() pthread_mutex_unlock(&_log_lock)
-//#define truncate_log() ftruncate(fileno(_log_fd), 0); _log_currsize = 0
 #define log_code(a) a
 #define set_log_level(n) _log_level = n
 #define set_log_maxsize(n) _log_maxsize = n
@@ -64,6 +67,7 @@ void _close_log();
 #define log_printf(n, ...) \
    if ((n) <= _log_level) { \
       _lock_log(); \
+      if (_log_fd == NULL) _log_fd = stdout; \
       _log_currsize += fprintf(_log_fd, __VA_ARGS__); \
       if (_log_currsize > _log_maxsize) { close_log(); _open_log(NULL, 0); } \
       _unlock_log(); \
@@ -85,6 +89,10 @@ void _close_log();
 #define truncate_log()
 #define assign_log_fd(fd)
 #define flush_log()
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif

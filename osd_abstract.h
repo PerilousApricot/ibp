@@ -49,7 +49,7 @@ public:
     virtual osd_id_t create_id() = 0;    // Returns an OSD object.  Think of it as a filename
     virtual int reserve(osd_id_t id, size_t len) = 0;  // Reserve space for the file
     virtual int remove(osd_id_t id) = 0;  // Remove the object
-    virtual int truncate(osd_id_t id) = 0;  // Remove the object
+    virtual int truncate(osd_id_t id, size_t len) = 0;  // Remove the object
     virtual size_t size(osd_id_t) = 0;      // Object size in bytes
     virtual int read(osd_id_t id, off_t offset, size_t len, buffer_t buffer) = 0;   //Read data
     virtual int write(osd_id_t id, off_t offset, size_t len, buffer_t buffer) = 0;  //Store data to disk

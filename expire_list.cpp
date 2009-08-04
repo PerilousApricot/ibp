@@ -14,6 +14,7 @@
 #include "ibp_ClientLib.h"
 #include "ibp_server.h"
 #include "network.h"
+#include "net_sock.h"
 #include "log.h"
 #include "dns_cache.h"
 #include "fmttypes.h"
@@ -26,7 +27,7 @@ time_t parse_time(char *buffer)
   time_t t;
   char *tmp, *bstate;
 
-printf("parse_time: buffer = %s\n", buffer);
+//printf("parse_time: buffer = %s\n", buffer);
 
   count = 0;
   tmp = string_token(buffer, ":", &bstate, &err);
@@ -88,7 +89,7 @@ int main(int argc, char **argv)
      printf("expire_list host port RID mode time count\n");
      printf("\n");
      printf("  mode  - abs or rel\n");
-     printf("  time  - Futurre time from now with format days:hours:min:sec\n");
+     printf("  time  - Future time with format of days:hours:min:sec\n");
      printf("  count - Number of allocations to retreive\n");
      printf("\n");
      return(0);
@@ -111,6 +112,8 @@ int main(int argc, char **argv)
   dns_cache_init(10);
 
   NetStream_t *ns = new_netstream();
+  ns_config_sock(ns, -1, 0);
+
   set_net_timeout(&dt, 5, 0);
 
   err = net_connect(ns, host, port, dt);

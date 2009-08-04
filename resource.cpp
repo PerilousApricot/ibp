@@ -54,7 +54,7 @@ typedef struct {    //*** Used to store usage info on a resource to keep from ha
  int state;
  Rsize_t used_space[2];
  Rsize_t n_allocs;
- Rsize_t n_proxy;
+ Rsize_t n_alias;
 } Usage_file_t;
 
 typedef struct {  //** Internal resource iterator
@@ -64,6 +64,9 @@ typedef struct {  //** Internal resource iterator
   Resource_t *r;
   Allocation_t a;
 }  res_iterator_t;
+
+void *resource_cleanup_thread(void *data);
+int _remove_allocation_for_make_free(Resource_t *r, Allocation_t *alloc, DB_iterator_t *it);
 
 //***************************************************************************
 //  rid2str - Converts the RID to a printable format
@@ -131,6 +134,25 @@ int is_empty_rid(RID_t *rid)
 }
 
 //***************************************************************************
+// compare_rid - Similar to strcmp but for RID's
+//***************************************************************************
+
+int compare_rid(RID_t *rid1, RID_t *rid2)
+{
+  int i;
+
+  if (rid1->id > rid2->id) {
+    i = 1;
+  } else if (rid1->id == rid2->id) {
+    i = 0;
+  } else {
+    i = -1;
+  }
+
+  return(i);     
+}
+
+//***************************************************************************
 // write_usage_file - Writes the usage file
 //***************************************************************************
 
@@ -145,7 +167,7 @@ int write_usage_file(char *fname, Resource_t *r, int state)
    usage.used_space[0] = r->used_space[0];
    usage.used_space[1] = r->used_space[1];
    usage.n_allocs = r->n_allocs;
-   usage.n_proxy = r->n_proxy;
+   usage.n_alias = r->n_alias;
    usage.state = state;
    fwrite((void *)&usage, sizeof(usage), 1, fd);
    fclose(fd);
@@ -157,7 +179,7 @@ int write_usage_file(char *fname, Resource_t *r, int state)
     mb = r->used_space[ALLOC_SOFT]; log_printf(10, "#soft_used = " LU " b\n", mb);
     mb = r->used_space[ALLOC_HARD]; log_printf(10, "#hard_used = " LU " b\n", mb);
     log_printf(10, "#n_allocations = " LU "\n", r->n_allocs);
-    log_printf(10, "#n_proxy = " LU "\n", r->n_proxy);
+    log_printf(10, "#n_alias = " LU "\n", r->n_alias);
 
    return(0);
 }
@@ -193,14 +215,14 @@ int read_usage_file(char *fname, Resource_t *r)
          r->used_space[0] = usage.used_space[0];
          r->used_space[1] = usage.used_space[1];
          r->n_allocs = usage.n_allocs;
-         r->n_proxy = usage.n_proxy;
+         r->n_alias = usage.n_alias;
 
          Rsize_t mb;
          log_printf(10, "read_usage_file: rid=%s\n",r->name); 
          mb = r->used_space[ALLOC_SOFT]/1024/1024; log_printf(10, "\n#soft_used = " LU "\n", mb);
          mb = r->used_space[ALLOC_HARD]/1024/1024; log_printf(10, "#hard_used = " LU "\n", mb);
          log_printf(10, "#n_allocations = " LU "\n", r->n_allocs);
-         log_printf(10, "#n_proxy = " LU "\n", r->n_proxy);
+         log_printf(10, "#n_alias = " LU "\n", r->n_alias);
       }
    }
 
@@ -215,7 +237,7 @@ int read_usage_file(char *fname, Resource_t *r)
 int print_resource_usage(Resource_t *r, FILE *fd)
 {
   fprintf(fd, "n_allocs = " LU "\n", r->n_allocs);
-  fprintf(fd, "n_proxy = " LU "\n", r->n_proxy);
+  fprintf(fd, "n_alias = " LU "\n", r->n_alias);
   fprintf(fd, "hard_usage = " LU "\n", r->used_space[ALLOC_HARD]);
   fprintf(fd, "soft_usage = " LU "\n", r->used_space[ALLOC_SOFT]);
 
@@ -261,7 +283,8 @@ int mkfs_resource(RID_t rid, char *dev_type, char *device_name, char *db_locatio
    res.enable_read_history = 1;   
    res.enable_write_history = 1;   
    res.enable_manage_history = 1;   
-
+   res.enable_alias_history = 1;   
+  
    //**Make the directory for the DB if needed
    snprintf(dname, sizeof(dname), "%s", db_location); 
    res.location = strdup(dname);
@@ -291,7 +314,7 @@ int mkfs_resource(RID_t rid, char *dev_type, char *device_name, char *db_locatio
    res.max_size[ALLOC_SOFT] = stat.f_bavail*stat.f_bsize;
    res.max_size[ALLOC_TOTAL] = stat.f_bavail*stat.f_bsize;
    res.used_space[ALLOC_HARD] = 0; res.used_space[ALLOC_SOFT] = 0;
-   res.n_allocs = 0; res.n_proxy = 0;
+   res.n_allocs = 0; res.n_alias = 0;
 
    err = create_history_table(&res);
    if (err != 0) {
@@ -319,8 +342,10 @@ int rebuild_remove_iter(res_iterator_t *ri)
      err = remove_alloc_iter_db(ri->dbi);          
   }
 
-  if (err == 0) {   //** If it's a physical allocation delete it
-     if (ri->a.is_proxy == 0) err = ri->r->fs->remove(ri->a.id);
+  if (err == 0) {  
+     err = ri->r->fs->remove(ri->a.id);
+//log_printf(10, "rebuild_put_iter: id=" LU " is_alias=%d\n", ri->a.id, ri->a.is_alias);
+//     if (ri->a.is_alias == 0) err = ri->r->fs->remove(ri->a.id);
   }
 
   return(err);
@@ -422,24 +447,32 @@ int rebuild_get_next(res_iterator_t *ri, Allocation_t *a)
   if (ri->mode != 1) {
       err = ri->r->fs->iterator_next(ri->fsi, &id);
       while (err == 0) {
-         log_printf(15, "rebuild_get_next: r=%s id=" LU " err=%d\n", ri->r->name, id, err);
+//         log_printf(15, "rebuild_get_next: r=%s id=" LU " err=%d\n", ri->r->name, id, err);
          err = ri->r->fs->read(id, 0, sizeof(Allocation_t), a);
-         if (err != sizeof(Allocation_t)) {
-            log_printf(0, "rebuild_get_next: rid=%s Can't read id=" LU ".  Skipping...\n", ri->r->name, id);
+//         log_printf(15, "rebuild_get_next: r=%s id=" LU " read err=%d sizeof(a)=%d\n", ri->r->name, id, err, sizeof(Allocation_t));
+         if (err == 0) { //** Nothing there so delete the filename
+            log_printf(0, "rebuild_get_next: rid=%s Empty allocation id=" LU ".  Removing it....\n", ri->r->name, id);
+            flush_log();
+            err = ri->r->fs->remove(id);
+            err = ri->r->fs->iterator_next(ri->fsi, &id);
+         } else if (err != sizeof(Allocation_t)) {
+            log_printf(0, "rebuild_get_next: rid=%s Can't read id=" LU ".  Skipping...nbytes=%d\n", ri->r->name, id, err);
             flush_log();
             err = ri->r->fs->iterator_next(ri->fsi, &id);
-         }
-      }  
-
-      if (err == sizeof(Allocation_t)) {
-        err = 0;
+         } else if (id != a->id) {  //** ID mismatch.. throw warning and skip
+            log_printf(0, "rebuild_get_next: rid=%s ID mismatch so skipping!!!! fs entry id=" LU ".  a.id=" LU "\n", ri->r->name, id,a->id);
+            flush_log();
+            err = ri->r->fs->iterator_next(ri->fsi, &id);
+        }
       }
   } else {
      err = db_iterator_next(ri->dbi, DB_NEXT, a);
+//     log_printf(15, "rebuild_get_next: DB r=%s id=" LU " err=%d\n", ri->r->name, a->id, err);
   }
 
-  if (err == 0) ri->a = *a;  //** Keep my copy for mods
+  ri->a = *a;  //** Keep my copy for mods
 
+  if (err == sizeof(Allocation_t)) err = 0;
   return(err);
 }
 
@@ -475,6 +508,12 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
    log_printf(0, "rebuild_resource(rid=%s):  Rebuilding Resource rid=%s.  Starting at %s  remove_expired=%d wipe_clean=%d truncate_expiration=%d\n", 
         r->name, r->name, print_time, remove_expired, wipe_clean, truncate_expiration);
 
+
+   if (wipe_clean == 1) {
+      log_printf(0, "rebuild_resource(rid=%s):  wipe_clean == 1 so exiting\n", r->name);
+      return(0);
+   }
+
    //** Mount it
    GError *error=NULL;
    GKeyFile *kfd;
@@ -498,7 +537,7 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
 
    //*** Now we have to fill it ***
    r->used_space[0] = 0; r->used_space[1] = 0;
-   r->n_allocs = 0;  r->n_proxy = 0;
+   r->n_allocs = 0;  r->n_alias = 0;
 
    t = time(NULL);
    if (wipe_clean == 3) t = 0;  //** Nothing gets deleted in this mode
@@ -522,11 +561,11 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
       }
 
       if ((a->expiration < t) && (remove_expired == 1)) {
-         log_printf(5, "rebuild_resource(rid=%s): Removing expired record with id: " LU " * estate: %d\n", r->name, id, estate);
+         ecnt++;
+         log_printf(5, "rebuild_resource(rid=%s): Removing expired record with id: " LU " * estate: %d (remove count:%d)\n", r->name, id, estate, ecnt);
          if ((err = rebuild_remove_iter(iter)) != 0) {
             log_printf(0, "rebuild_resource(rid=%s): Error Removing id " LU "  from DB Error=%d\n", r->name, id, err);
          }
-         ecnt++;
       } else {         //*** Adding the record
          if (((a->expiration > max_expiration) && (truncate_expiration == 1)) || (wipe_clean == 3)) {
             t1 = a->expiration; t2 = max_expiration;
@@ -536,14 +575,14 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
                   log_printf(0, "rebuild_resource(rid=%s): Error Adding id " LU " to primary DB Error=%d\n", r->name, a->id, err);
             }
          } else {
-           log_printf(5, "rebuild_resource(rid=%s): Adding record %d with id: " LU " * estte: %d\n",r->name, cnt, id, estate);
+           log_printf(5, "rebuild_resource(rid=%s): Adding record %d with id: " LU " * estate: %d\n",r->name, cnt, id, estate);
          }
 
          r->used_space[a->reliability] += a->max_size;
          
          nbuff++;
          cnt++;
-         if (a->is_proxy) pcnt++;
+         if (a->is_alias) pcnt++;
      }
 
      //**** Buffer is full so update the DB ****
@@ -571,11 +610,11 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
    rebuild_end(iter);
 
    r->n_allocs = cnt;
-   r->n_proxy = pcnt;
+   r->n_alias = pcnt;
 
    t = time(NULL);
    log_printf(0, "\nrebuild_resource(rid=%s): %d allocations added\n", r->name, cnt);
-   log_printf(0, "rebuild_resource(rid=%s): %d proxy allocations added\n", r->name, pcnt);
+   log_printf(0, "rebuild_resource(rid=%s): %d alias allocations added\n", r->name, pcnt);
    log_printf(0, "rebuild_resource(rid=%s): %d allocations removed\n", r->name, ecnt);
    Rsize_t mb;
    mb = r->used_space[ALLOC_SOFT]/1024/1024; log_printf(0, "#(rid=%s) soft_used = " LU "\n", r->name, mb);
@@ -588,6 +627,128 @@ int rebuild_resource(Resource_t *r, DB_env_t *env, int remove_expired, int wipe_
 }
 
 //---------------------------------------------------------------------------
+
+//***************************************************************************
+// calc_usage - Cycles through all the records to calcualte the used hard
+//    and soft space.  This should only be used if the resource was not 
+//    unmounted cleanly.
+//***************************************************************************
+
+int calc_usage(Resource_t *r)
+{
+  DB_iterator_t *dbi;
+  Allocation_t a;
+
+  log_printf(15, "calc_usage(rid=%s):  Recalculating usage form scratch\n", r->name);
+
+  r->used_space[0] = 0; r->used_space[1] = 0;
+  r->n_allocs = 0;  r->n_alias = 0;
+
+  dbi = id_iterator(&(r->db));
+  while (db_iterator_next(dbi, DB_NEXT, &a) == 0) {     
+     log_printf(10, "calc_usage(rid=%s): n=" LU " ------------- id=" LU "\n", r->name, r->n_allocs, a.id);
+//print_allocation_resource(r, stdout, &a);
+     r->used_space[a.reliability] += a.max_size;
+     r->n_allocs++;
+     if (a.is_alias == 1) r->n_alias++;
+  }
+  db_iterator_end(dbi);
+
+  log_printf(15, "calc_usage(rid=%s): finished... n_allocs= "LU " n_alias=" LU "\n", r->name, r->n_allocs, r->n_alias);
+
+  return(0);
+}
+
+//***************************************************************************
+// perform_truncate - Adjusts all allocations to the given max
+//    duration.  It will also remove any expired allocations.
+//***************************************************************************
+
+int perform_truncate(Resource_t *r)
+{
+  DB_iterator_t *dbi;
+  Allocation_t *a;
+  const int a_size = 1024;
+  Allocation_t alist[a_size];
+  time_t max_expiration, t1, t2;
+  int estate, err, cnt, ecnt, nbuff, i;
+
+  log_printf(15, "calc_usage(rid=%s):  Recalculating usage form scratch\n", r->name);
+
+  max_expiration = time(0) + r->max_duration;
+
+  cnt = 0; ecnt = 0; nbuff = 0;
+  dbi = id_iterator(&(r->db));
+  a = &(alist[nbuff]);
+  while (db_iterator_next(dbi, DB_NEXT, a) == 0) {
+      if (a->expiration < time(NULL)) {
+         estate = -1;
+      } else {
+         estate = (a->expiration > max_expiration) ? 1 : 0;
+      }
+
+      switch (estate) {
+        case -1:     //** Expired allocation
+           ecnt++;
+           log_printf(5, "perform_truncate(rid=%s): Remove cnt=%d  id=" LU " * estate: %d\n",r->name, cnt, a->id,  estate);
+           err = _remove_allocation_for_make_free(r, a, dbi);
+           break;
+        case 0:      //** Ok allocation
+           cnt++;
+           log_printf(5, "perform_truncate(rid=%s): cnt=%d  id=" LU " * estate: %d\n",r->name, cnt, a->id,  estate);
+           break;
+        case 1:      //** Truncate expiration
+           cnt++;
+           t1 = a->expiration;
+           a->expiration = time(0) + r->max_duration;
+           t2 = a->expiration;
+           log_printf(5, "perform_truncate(rid=%s): Truncating duration for record %d with id: " LU " expiration curr:" TT " * new:" TT " * estate: %d\n",r->name, cnt, a->id, t1, t2, estate);
+           if ((err = modify_alloc_iter_db(dbi, a)) != 0) {
+                  log_printf(0, "perform_truncate(rid=%s): Error modifying id " LU " to primary DB Error=%d\n", r->name, a->id, err);
+           } 
+           
+           if (nbuff >= (a_size-1)) {
+              log_printf(5, "perform_truncate(rid=%s): Dumping buffer=%d\n",r->name, nbuff);
+              if (r->update_alloc == 1) {
+                 for (i=0; i<=nbuff; i++) {
+                      a = &(alist[i]);
+                    if (a->is_alias == 0) {
+                       r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+                    } else if (r->enable_alias_history) {
+                       r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+                    }
+                 }
+              }
+      
+              nbuff = 0;
+           } else {
+              nbuff++;
+           }
+
+           a = &(alist[nbuff]);
+           break;
+      }      
+  }
+  db_iterator_end(dbi);
+
+  if (nbuff > 0) {
+     log_printf(5, "perform_truncate(rid=%s): Dumping buffer=%d\n",r->name, nbuff);
+     if (r->update_alloc == 1) {
+        for (i=0; i<nbuff; i++) {
+           a = &(alist[i]);
+           if (a->is_alias == 0) {
+              r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+           } else if (r->enable_alias_history) {
+              r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+           }
+        }
+     }
+  }
+
+  log_printf(15, "perform_truncate(rid=%s): finished... n_allocs=%d  n_removed=%d\n", r->name, cnt, ecnt);
+
+  return(0);
+}
 
 //***************************************************************************
 // parse_resource - Parses the resource Keyfile
@@ -613,6 +774,7 @@ int parse_resource(Resource_t *res, GKeyFile *keyfile, char *group)
    res->enable_write_history = g_key_file_get_integer(keyfile, group, "enable_write_history", NULL);
    res->enable_read_history = g_key_file_get_integer(keyfile, group, "enable_read_history", NULL);
    res->enable_manage_history = g_key_file_get_integer(keyfile, group, "enable_manage_history", NULL);
+   res->enable_alias_history = g_key_file_get_integer(keyfile, group, "enable_alias_history", NULL);
 
    res->max_duration = g_key_file_get_integer(keyfile, group, "max_duration", NULL);
    if (res->max_duration == 0) {
@@ -724,12 +886,33 @@ int mount_resource(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *db
      abort();
    }
 
+   //** Init the lock **
+   pthread_mutex_init(&(res->mutex), NULL);
+   pthread_mutex_unlock(&(res->mutex));
+
+   pthread_mutex_init(&(res->cleanup_lock), NULL);
+   pthread_mutex_unlock(&(res->cleanup_lock));
+   pthread_cond_init(&(res->cleanup_cond), NULL);
+   res->cleanup_shutdown = -1;
+
    //** Rebuild the DB or mount it here **
    snprintf(fname, sizeof(fname), "%s/usage", res->location); 
    if (force_rebuild) {
-      err = rebuild_resource(res, dbenv, 1, force_rebuild, truncate_expiration);
+      switch (force_rebuild) {
+         case 1: 
+            err = mount_db_generic(kfd, dbenv, &(res->db), 1);
+            if (err == 0) {
+               calc_usage(res);
+               if (truncate_expiration == 1) perform_truncate(res);
+            }
+            break;
+         default:     
+            err = rebuild_resource(res, dbenv, 1, force_rebuild, truncate_expiration);
+      }
    } else if (read_usage_file(fname, res) == 1) {
-      err = rebuild_resource(res, dbenv, 1, 1, truncate_expiration);
+      err = mount_db_generic(kfd, dbenv, &(res->db), 1);
+      calc_usage(res);
+//      err = rebuild_resource(res, dbenv, 1, 1, truncate_expiration);
    } else {   
       err = mount_db_generic(kfd, dbenv, &(res->db), 0);
    }
@@ -744,15 +927,14 @@ int mount_resource(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *db
 
    if (err != 0) return(err);
 
-   //** Init the lock **
-   pthread_mutex_init(&(res->mutex), NULL);
-   pthread_mutex_unlock(&(res->mutex));
-  
    //*** clean up ***
    g_key_file_free(kfd);
 
    //** Update the usage **
    write_usage_file(fname, res, _RESOURCE_STATE_BAD);    //**Mark it as dirty
+
+   //** Launch the cleanup thread
+//   pthread_create(&(res->cleanup_thread), NULL, resource_cleanup_thread, (void *)res);
 
    return(err);
 }
@@ -764,8 +946,17 @@ int mount_resource(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *db
 int umount_resource(Resource_t *res)
 {
   char fname[2048];
-
+  void *dummy;
   log_printf(15, "umount_resource:  Unmounting resource %s\n", res->name); flush_log();
+
+  //** Kill the cleanup thread
+  if (res->cleanup_shutdown == 0) {
+     pthread_mutex_lock(&(res->cleanup_lock));
+     res->cleanup_shutdown = 1;
+     pthread_cond_signal(&(res->cleanup_cond));
+     pthread_mutex_unlock(&(res->cleanup_lock));
+     pthread_join(res->cleanup_thread, &dummy);
+  }
 
   umount_db(&(res->db));
   umount_history_table(res);
@@ -798,6 +989,7 @@ int print_resource(Resource_t *res, FILE *fd)
    fprintf(fd, "enable_read_history = %d\n", res->enable_read_history);
    fprintf(fd, "enable_write_history = %d\n", res->enable_write_history);
    fprintf(fd, "enable_manage_history = %d\n", res->enable_manage_history);
+   fprintf(fd, "enable_alias_history = %d\n", res->enable_alias_history);
 
    n = res->max_size[ALLOC_TOTAL]/1024/1024; fprintf(fd, "max_size = " LU "\n", n);
    n = res->max_size[ALLOC_SOFT]/1024/1024; fprintf(fd, "soft_size = " LU "\n", n);
@@ -812,7 +1004,7 @@ int print_resource(Resource_t *res, FILE *fd)
    n = res->used_space[ALLOC_HARD]; fprintf(fd, "#hard_used = " LU " b\n", n);
 
    fprintf(fd, "#n_allocations = " LU "\n", res->n_allocs);
-   fprintf(fd, "#n_proxy = " LU "\n", res->n_proxy);
+   fprintf(fd, "#n_alias = " LU "\n", res->n_alias);
    fprintf(fd, "\n");
    return(0);
 }
@@ -837,21 +1029,34 @@ int _remove_allocation(Resource_t *r, Allocation_t *alloc, bool dolock)
 
    log_printf(10, "_remove_allocation:  Removed db entry\n");
 
-   if (alloc->is_proxy == 0) {
+   if (r->enable_alias_history == 1) {
       if ((err = r->fs->remove(alloc->id)) != 0) { 
          debug_printf(1, "_remove_allocation:  Error with fs->remove!  Error=%d\n", err); 
-//         return(err); 
+      }
+   } else if (alloc->is_alias == 0) {
+      if ((err = r->fs->remove(alloc->id)) != 0) { 
+         debug_printf(1, "_remove_allocation:  Error with fs->remove!  Error=%d\n", err); 
       }
    } else {
-        log_printf(15, "_remove_allocation:  a->is_proxy=1.  Skipping fs->remove().\n");
+        log_printf(15, "_remove_allocation:  a->is_alias=1.  Skipping fs->remove().\n");
    }
    
    debug_printf(10, "_remove_allocation: After remove\n");
 
    if (dolock) pthread_mutex_lock(&(r->mutex));
-   r->used_space[alloc->reliability] -= alloc->max_size;   //** Upodate the amount of space used
+log_printf(15, "_remove_allocation: start rel=%d used=" LU " a.max_size=" LU "\n", alloc->reliability, 
+   r->used_space[alloc->reliability], alloc->max_size);
+
    r->n_allocs--;
-   if (alloc->is_proxy == 1) r->n_proxy--;
+   if (alloc->is_alias == 0) {
+      r->used_space[alloc->reliability] -= alloc->max_size;   //** Upodate the amount of space used
+   } else {
+      r->n_alias--;
+   }
+
+log_printf(15, "_remove_allocation: end rel=%d used=" LU " a.max_size=" LU "\n", alloc->reliability, 
+   r->used_space[alloc->reliability], alloc->max_size);
+
    if (dolock) pthread_mutex_unlock(&(r->mutex));
 
    debug_printf(10, "_remove_allocation: end of routine\n");
@@ -867,6 +1072,28 @@ int _remove_allocation(Resource_t *r, Allocation_t *alloc, bool dolock)
 int remove_allocation_resource(Resource_t *r, Allocation_t *alloc)
 {
   return(_remove_allocation(r, alloc, true));
+}
+
+//***************************************************************************
+// merge_allocation_resource - Merges the space for the child allocation, a,
+//    into the master(ma).  THe child allocations data is NOT merged and is lost.
+//    The child allocation is also deleted.
+//***************************************************************************
+
+int merge_allocation_resource(Resource_t *r, Allocation_t *ma, Allocation_t *a)
+{
+  int err;
+  pthread_mutex_lock(&(r->mutex));
+  err = _remove_allocation(r, a, false);
+  if (err == 0) {
+     r->used_space[ma->reliability] += a->max_size;   //** Update the amount of space used
+     ma->max_size += a->max_size;
+     if (r->update_alloc == 1) r->fs->write(ma->id, 0, sizeof(Allocation_t), ma);
+     err = modify_alloc_db(&(r->db), ma);
+  }
+  pthread_mutex_unlock(&(r->mutex));
+  
+  return(err);
 }
 
 //***************************************************************************
@@ -888,22 +1115,25 @@ int _remove_allocation_for_make_free(Resource_t *r, Allocation_t *alloc, DB_iter
 
    log_printf(10, "_remove_allocation_for_make_free:  Removed db entry\n");
 
-  if (alloc->is_proxy == 0) {
+  if (r->enable_alias_history) {
      if ((err = r->fs->remove(alloc->id)) != 0) { 
         debug_printf(1, "_remove_allocation_for_make_free:  Error with fs->remove!  Error=%d\n", err); 
-//        return(err); 
+     }
+  } else if (alloc->is_alias == 0) {
+     if ((err = r->fs->remove(alloc->id)) != 0) { 
+        debug_printf(1, "_remove_allocation_for_make_free:  Error with fs->remove!  Error=%d\n", err); 
      }
    } else {
-        log_printf(15, "_remove_allocation_for_make_free:  a->is_proxy=1.  Skipping fs->remove().\n");
+        log_printf(15, "_remove_allocation_for_make_free:  a->is_alias=1.  Skipping fs->remove().\n");
    }
 
    debug_printf(10, "_remove_allocation_for_make_free: After remove\n");
 
-   if (alloc->is_proxy == 0) {
+   if (alloc->is_alias == 0) {
       r->used_space[alloc->reliability] -= alloc->max_size;   //** Upodate the amount of space used
    }
    r->n_allocs--;
-   if (alloc->is_proxy == 1) r->n_proxy--;
+   if (alloc->is_alias == 1) r->n_alias--;
 
    debug_printf(10, "_remove_allocation_for_make_free: end of routine\n");
   
@@ -951,10 +1181,10 @@ int make_free_space_iterator(Resource_t *r, DB_iterator_t *dbi, Rsize_t *nbytesl
   finished = 0;
   do {
      if ((err = db_iterator_next(dbi, DB_NEXT, &a)) == 0) {
-       if (a.is_proxy == 0) err = r->fs->read(a.id, 0, sizeof(Allocation_t), &a);
+       if (a.is_alias == 0) err = r->fs->read(a.id, 0, sizeof(Allocation_t), &a);
 
        if (a.expiration < timestamp) {
-          if (nleft < a.max_size) {    //** for proxy allocations max_size == 0
+          if (nleft < a.max_size) {    //** for alias allocations max_size == 0
              nleft = 0;          //
           } else {
              nleft -= a.max_size;            //** Free to delete it
@@ -1074,62 +1304,163 @@ void free_expired_allocations(Resource_t *r)
 }
 
 //***************************************************************************
-// create_allocation_resource - Creates and returns a uniqe allocation
-//        for the resource
+// resource_allocable - Returns the max amount of space that can be allocated
+//    for the resource.
 //***************************************************************************
 
-int create_allocation_resource(Resource_t *r, Allocation_t *a, size_t size, int type, 
-    int reliability, time_t length, int is_proxy, int preallocate_space)
+uint64_t resource_allocable(Resource_t *r, int free_space)
+{
+  int64_t diff, fsdiff;
+  uint64_t allocable;
+  struct statfs stat;
+
+  if (free_space == 1) free_expired_allocations(r);
+
+  pthread_mutex_lock(&(r->mutex));  
+
+  diff = r->max_size[ALLOC_TOTAL] - r->used_space[ALLOC_HARD] - r->used_space[ALLOC_SOFT];
+  if (diff < 0) diff = 0;
+
+  r->fs->statfs(&stat);
+  fsdiff = stat.f_bavail*stat.f_bsize - r->minfree - r->pending;
+  if (fsdiff < 0) fsdiff = 0;
+
+  pthread_mutex_unlock(&(r->mutex));  
+
+  allocable = (diff < fsdiff) ? diff : fsdiff;
+
+  return(allocable);
+}
+
+
+//***************************************************************************
+// _new_allocation_resource - Creates and returns a uniqe allocation
+//        for the resource.
+//
+//  **NOTE: NO LOCKING IS DONE.  THE ALLOCATION IS NOT BLANKED!  *****
+//***************************************************************************
+
+int _new_allocation_resource(Resource_t *r, Allocation_t *a, size_t size, int type, 
+    int reliability, time_t length, int is_alias)
 {
    int err = 0;
-   size_t total_size;
 
-   memset(a, 0, sizeof(Allocation_t));
    a->max_size = size;
    a->size = 0;
    a->type = type;
    a->reliability = reliability;
    a->expiration = length;
    a->read_refcount = 1;
-   a->write_refcount = 1;
+   a->write_refcount = 0;
    a->r_pos = 0;
    a->w_pos = 0;
-   a->is_proxy = is_proxy;
+   a->is_alias = is_alias;
 
-   pthread_mutex_lock(&(r->mutex));
-   if ((err = make_space(r, size, reliability)) == 0) {  //**Make sure we have enough space and record it
+   //**Make sure we have enough space if this is a real allocation and record it  
+   if (a->is_alias == 0) {
+      err = make_space(r, size, reliability);
       if (r->preallocate) r->pending += size;
-      a->id = r->fs->create_id();
+   }
 
-      create_alloc_db(&(r->db), a);
+   if (err != 0) return(err);  //** Exit if not enough space
 
-      //** Always store the initial alloc in the file header
+   a->id = r->fs->create_id();
+
+   create_alloc_db(&(r->db), a);
+
+   //** Always store the initial alloc in the file header
+   if (a->is_alias == 0) {
       write_allocation_header(r, a);     //** Store the header
       blank_history(r, a->id);  //** Also store the history
+   } else if (r->enable_alias_history) {
+      write_allocation_header(r, a);     //** Store the header
+      blank_history(r, a->id);  //** Also store the history
+   }
 
-      r->n_allocs++;
-      if (is_proxy == 1) r->n_proxy++;
+   r->n_allocs++;
+   if (is_alias == 0) {
       r->used_space[a->reliability] += a->max_size;
-debug_printf(5, "create_allocation_resource: rid=%s rel=%d, used=" LU "\n", r->name, a->reliability, r->used_space[a->reliability]); 
-debug_printf(5, "create_allocation_resource: rcap=%s\n", a->caps[READ_CAP].v); 
+   } else {
+      r->n_alias++;
+   }
+
+debug_printf(5, "_new_allocation_resource: rid=%s rel=%d, used=" LU "\n", r->name, a->reliability, r->used_space[a->reliability]); 
+debug_printf(5, "_new_allocation_resource: rcap=%s\n", a->caps[READ_CAP].v); 
+
+   return(err);
+}
+
+//***************************************************************************
+// create_allocation_resource - Creates and returns a uniqe allocation
+//        for the resource
+//***************************************************************************
+
+int create_allocation_resource(Resource_t *r, Allocation_t *a, size_t size, int type, 
+    int reliability, time_t length, int is_alias, int preallocate_space)
+{
+   int err;
+   size_t total_size;
+
+   memset(a, 0, sizeof(Allocation_t));
+
+   pthread_mutex_lock(&(r->mutex));
+   err = _new_allocation_resource(r, a, size, type, reliability, length, is_alias);
+   pthread_mutex_unlock(&(r->mutex));
+
+   if (err == 0) {
+     if (a->is_alias == 0) {
+        total_size = ALLOC_HEADER + size;
+        if (preallocate_space == 1) r->fs->reserve(a->id, total_size);       //** Reserve the space
+     }
+
+   }
+
+   return(err);
+}
+
+
+//***************************************************************************
+// split_allocation_resource - Splits an existing allocation and returns a unique
+//      allocation with the correct space and trims the size of the master allocation
+//***************************************************************************
+
+int split_allocation_resource(Resource_t *r, Allocation_t *ma, Allocation_t *a, size_t size, int type, 
+    int reliability, time_t length, int is_alias, int preallocate_space)
+{
+   int err;
+   size_t total_size;
+
+   if (ma->max_size < size) {
+      log_printf(15, "split_allocation_resource: Not enough space left on master id! mid=" LU " msize=" ST " size=" ST "\n", ma->id, ma->size, size);
+      return(1);
+   }
+
+   memset(a, 0, sizeof(Allocation_t));
+   a->split_parent_id = ma->id;
+
+   pthread_mutex_lock(&(r->mutex));
+   r->used_space[ma->reliability] = r->used_space[ma->reliability] - size;
+   ma->max_size = ma->max_size - size;
+   err = _new_allocation_resource(r, a, size, type, reliability, length, is_alias);
+   if (err == 0) {
+//      r->used_space[ma->reliability] = r->used_space[ma->reliability] + size;    
+      if (r->fs->size(ma->id) > ma->max_size)  r->fs->truncate(ma->id, ma->max_size+ALLOC_HEADER);
+      if (ma->size > ma->max_size)  ma->size =  ma->max_size;
+      if (r->update_alloc == 1) r->fs->write(ma->id, 0, sizeof(Allocation_t), ma);
+      err = modify_alloc_db(&(r->db), ma);  //** Store the master back with updated size
+   } else {  //** Problem so undo size tweaks
+      log_printf(15, "Error with _new_allocation!\n");
+      r->used_space[ma->reliability] = r->used_space[ma->reliability] + size;
+      ma->max_size = ma->max_size + size;
    }
    pthread_mutex_unlock(&(r->mutex));
 
    if (err == 0) {
-     if (a->is_proxy == 0) {
+     if (a->is_alias == 0) {
         total_size = ALLOC_HEADER + size;
         if (preallocate_space == 1) r->fs->reserve(a->id, total_size);       //** Reserve the space
-       
-//        if (r->preallocate) { //** Actually fill the space they requested if needed
-//           blank_space(r, a->id, ALLOC_HEADER, size);
-//
-//           pthread_mutex_lock(&(r->mutex));
-//           r->pending -= size;
-//           pthread_mutex_unlock(&(r->mutex));      
-//        } 
      }
-
-   }
+   } 
 
    return(err);
 }
@@ -1146,7 +1477,7 @@ int rename_allocation_resource(Resource_t *r, Allocation_t *a)
    pthread_mutex_lock(&(r->mutex));
    err = remove_alloc_db(&(r->db), a);
    if (err == 0)  create_alloc_db(&(r->db), a);
-   if (a->is_proxy == 0) r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+   if (a->is_alias == 0) r->fs->write(a->id, 0, sizeof(Allocation_t), a);
    pthread_mutex_unlock(&(r->mutex));
 
    return(err);
@@ -1190,7 +1521,13 @@ int modify_allocation_resource(Resource_t *r, osd_id_t id, Allocation_t *a)
 
   err = 0;
 
-  if (r->update_alloc == 1) r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+  if (r->update_alloc == 1) {
+     if (a->is_alias == 0) {
+        r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+     } else if (r->enable_alias_history) {
+        r->fs->write(a->id, 0, sizeof(Allocation_t), a);
+     }
+  }
 
   if ((err = get_allocation_resource(r, a->id, &old_a)) != 0) {
      log_printf(0, "put_allocation_resource: Can't find id " LU "  db err = %d\n", a->id, err);
@@ -1198,38 +1535,40 @@ int modify_allocation_resource(Resource_t *r, osd_id_t id, Allocation_t *a)
   }
 
   if ((old_a.reliability != a->reliability) || (old_a.max_size != a->max_size)) {
-     pthread_mutex_lock(&(r->mutex));
-     r->used_space[old_a.reliability] -= old_a.max_size;   //** Update the amount of space used from the old a
-
-     size = 0;
-     err = 0;
-     if (old_a.max_size < a->max_size) {  //** Growing so need to add space
-        size = a->max_size - old_a.max_size;
-
-        if ((err = make_space(r, a->max_size, a->reliability)) == 0) {  //**Make sure we have enough space and record it
-           if (r->preallocate) r->pending += size;
-        } else {
-           log_printf(0, "modify_allocation_resource:  Error with make_space err=%d\n", err);
-        }
-     }
-
-     if (err == 0) {   
-         r->used_space[a->reliability] += a->max_size;  //** Add in the new size if no errors
-     } else {
-        r->used_space[old_a.reliability] += old_a.max_size;   //** If not enough space revert back
-     }
-
-     pthread_mutex_unlock(&(r->mutex));
-
-     if (err != 0) {
-        return(err);  // ** FAiled on make_space
-     } else if ((r->preallocate) && (size > 0)) { //** Actually fill the extra space they requested
-        blank_space(r, a->id, old_a.max_size, size);
- 
+     if (a->is_alias == 0) {
         pthread_mutex_lock(&(r->mutex));
-        r->pending -= size;
-        pthread_mutex_unlock(&(r->mutex));      
-     }  
+        r->used_space[old_a.reliability] -= old_a.max_size;   //** Update the amount of space used from the old a
+
+        size = 0;
+        err = 0;
+        if (old_a.max_size < a->max_size) {  //** Growing so need to add space
+           size = a->max_size - old_a.max_size;
+
+           if ((err = make_space(r, a->max_size, a->reliability)) == 0) {  //**Make sure we have enough space and record it
+              if (r->preallocate) r->pending += size;
+           } else {
+              log_printf(0, "modify_allocation_resource:  Error with make_space err=%d\n", err);
+           }
+        }
+
+        if (err == 0) {   
+            r->used_space[a->reliability] += a->max_size;  //** Add in the new size if no errors
+        } else {
+           r->used_space[old_a.reliability] += old_a.max_size;   //** If not enough space revert back
+        }
+
+        pthread_mutex_unlock(&(r->mutex));
+     
+        if (err != 0) {
+           return(err);  // ** FAiled on make_space
+        } else if ((r->preallocate) && (size > 0)) { //** Actually fill the extra space they requested
+           blank_space(r, a->id, old_a.max_size, size);
+  
+           pthread_mutex_lock(&(r->mutex));
+           r->pending -= size;
+           pthread_mutex_unlock(&(r->mutex));      
+        }  
+     }
   }
 
   
@@ -1350,7 +1689,7 @@ int print_allocation_resource(Resource_t *r, FILE *fd, Allocation_t *a)
   int64_t diff;
 
   fprintf(fd, "id = " LU "\n", a->id);
-  fprintf(fd, "is_proxy = %d\n", a->is_proxy);  
+  fprintf(fd, "is_alias = %d\n", a->is_alias);  
   fprintf(fd, "read_cap = %s\n", a->caps[READ_CAP].v);
   fprintf(fd, "write_cap = %s\n", a->caps[WRITE_CAP].v);
   fprintf(fd, "manage_cap = %s\n", a->caps[MANAGE_CAP].v);
@@ -1451,7 +1790,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
      if (err!= 0) {
         log_printf(10, "get_next_walk_expire_iterator: Error or end with next_hard: %d \n", err);
         wei->hard_a.expiration = 0;
-     } else if (wei->hard_a.is_proxy == 0) {
+     } else if (wei->hard_a.is_alias == 0) {
        err = wei->r->fs->read(wei->hard_a.id, 0, sizeof(Allocation_t), &(wei->hard_a));
      }
      
@@ -1459,7 +1798,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
      if (err!= 0) {
         log_printf(10, "get_next_walk_expire_iterator: Error or end with next_soft: %d \n", err);
         wei->soft_a.expiration = 0;
-     } else if (wei->soft_a.is_proxy == 0) {
+     } else if (wei->soft_a.is_alias == 0) {
        err = wei->r->fs->read(wei->soft_a.id, 0, sizeof(Allocation_t), &(wei->soft_a));
      }
   }
@@ -1476,7 +1815,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
         if (err!= 0) {
            log_printf(10, "get_next_walk_expire_iterator: Error or end with next_soft: %d \n", err);
            wei->soft_a.expiration = 0;
-        } else if (wei->soft_a.is_proxy == 0) {
+        } else if (wei->soft_a.is_alias == 0) {
            err = wei->r->fs->read(wei->soft_a.id, 0, sizeof(Allocation_t), &(wei->soft_a));
         }
 
@@ -1489,7 +1828,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
      if (err!= 0) {
         log_printf(10, "get_next_walk_expire_iterator: Error or end with next_hard: %d \n", err);
         wei->hard_a.expiration = 0;
-     } else if (wei->hard_a.is_proxy == 0) {
+     } else if (wei->hard_a.is_alias == 0) {
        err = wei->r->fs->read(wei->hard_a.id, 0, sizeof(Allocation_t), &(wei->hard_a));
      }
 
@@ -1510,7 +1849,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
      if (err!= 0) {
         log_printf(10, "get_next_walk_expire_iterator: Error or end with next_soft: %d \n", err);
         wei->soft_a.expiration = 0;
-     } else if (wei->soft_a.is_proxy == 0) {
+     } else if (wei->soft_a.is_alias == 0) {
         err = wei->r->fs->read(wei->soft_a.id, 0, sizeof(Allocation_t), &(wei->soft_a));
      }
   } else {  //** hard < soft so return the hard a
@@ -1519,7 +1858,7 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
      if (err!= 0) {
         log_printf(10, "get_next_walk_expire_iterator: Error or end with next_hard: %d \n", err);
         wei->hard_a.expiration = 0;
-     } else if (wei->hard_a.is_proxy == 0) {
+     } else if (wei->hard_a.is_alias == 0) {
        err = wei->r->fs->read(wei->hard_a.id, 0, sizeof(Allocation_t), &(wei->hard_a));
      }
   }    
@@ -1528,3 +1867,95 @@ int get_next_walk_expire_iterator(walk_expire_iterator_t *wei, int direction, Al
   return(0);  
 }
   
+//*****************************************************************
+// resource_cleanup  - Performs the actual resource cleanup
+//*****************************************************************
+
+void resource_cleanup(Resource_t *r)
+{
+  int max_alloc = 100;
+  int i, n, err;
+  Allocation_t a[max_alloc], b;
+  walk_expire_iterator_t *wei;
+
+  log_printf(5, "resource_background_cleanup: Start of routine.  rid=%s time= " TT "\n",r->name, time(NULL));
+  
+  n = max_alloc;
+  while (n == max_alloc) {
+    //** Perform the walk
+    wei = walk_expire_iterator_begin(r);
+    n = max_alloc;
+    for (i=0; i<max_alloc; i++) {
+       err = get_next_walk_expire_iterator(wei, DBR_NEXT, &(a[i]));
+       if (err != 0) { n = i; break; }
+       if (a[i].expiration > time(NULL)) { n = i; break; }
+    }
+    walk_expire_iterator_end(wei);
+
+    log_printf(5, "resource_background_cleanup: rid=%s n=%d\n", r->name, n);
+
+    //** Do the actual removal
+    for (i=0; i<n; i++) {
+       log_printf(5, "resource_background_cleanup:i=%d.  rid=%s checking/removing:" LU "\n",i, r->name, a[i].id);
+//       pthread_mutex_lock(&(r->mutex));
+//       dbr_lock(&(r->db));
+       err = get_alloc_with_id_db(&(r->db), a[i].id, &b);
+       if (err == 0) {
+          if (b.expiration < time(NULL)) _remove_allocation(r, &b, true);
+       }
+//       dbr_unlock(&(r->db));
+//       pthread_mutex_unlock(&(r->mutex));
+    }
+  }
+
+  log_printf(5, "resource_background_cleanup: End of routine.  rid=%s time= " TT "\n",r->name, time(NULL));
+
+  return;
+}
+
+//*****************************************************************
+// resource_cleanup_thread - Thread for doing background cleanups
+//*****************************************************************
+
+void *resource_cleanup_thread(void *data)
+{
+  Resource_t *r = (Resource_t *)data;
+
+  struct timespec t;
+
+  log_printf(5, "resource_cleanup_thread: Start.  rid=%s time= " TT "\n",r->name, time(NULL));
+
+  pthread_mutex_lock(&(r->cleanup_lock));
+  while (r->cleanup_shutdown == 0) {
+     pthread_mutex_unlock(&(r->cleanup_lock));
+
+     resource_cleanup(r);
+
+     t.tv_sec = time(NULL) + 300;    //Cleanup every 5 minutes
+     t.tv_nsec = 0;
+     pthread_mutex_lock(&(r->cleanup_lock));
+     if (r->cleanup_shutdown == 0) {
+        log_printf(5, "resource_cleanup_thread: Sleeping rid=%s time= " TT " shutdown=%d\n",r->name, time(NULL), r->cleanup_shutdown);
+        pthread_cond_timedwait(&(r->cleanup_cond), &(r->cleanup_lock), &t);
+     }
+     log_printf(5, "resource_cleanup_thread: waking up rid=%s time= " TT " shutdown=%d\n",r->name, time(NULL), r->cleanup_shutdown);
+     flush_log();
+  }
+
+  pthread_mutex_unlock(&(r->cleanup_lock));
+
+  log_printf(5, "resource_cleanup_thread: Exit.  rid=%s time= " TT "\n",r->name, time(NULL));
+  flush_log();
+  pthread_exit(NULL);
+}
+
+//*****************************************************************
+// launch_resource_cleanup_thread 
+//*****************************************************************
+
+void launch_resource_cleanup_thread(Resource_t *r)
+{
+  r->cleanup_shutdown = 0;
+  pthread_create(&(r->cleanup_thread), NULL, resource_cleanup_thread, (void *)r);
+}
+

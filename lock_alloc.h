@@ -33,6 +33,8 @@ http://www.accre.vanderbilt.edu
 
 void lock_osd_id(osd_id_t id);
 void unlock_osd_id(osd_id_t id);
+void lock_osd_id_pair(osd_id_t id1, osd_id_t id2);
+void unlock_osd_id_pair(osd_id_t id1, osd_id_t id2);
 void lock_alloc_init();
 void lock_alloc_destroy();
 

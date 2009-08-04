@@ -1,6 +1,3 @@
-int main(int argc, char ** argv) { }
-
-#if 0
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,10 +45,11 @@ void print_manage_history(Allocation_manage_ts_t *ts_list, int start)
         }
     
         switch (ts->cmd) {
-          case IBP_MANAGE:         cmd = "IBP_MANAGE       "; break;        
-          case IBP_PROXY_MANAGE:   cmd = "IBP_PROXY_MANAGE "; break;        
+          case IBP_MANAGE:         cmd = "IBP_MANAGE        "; break;        
+          case IBP_ALIAS_MANAGE:   cmd = "IBP_ALIAS_MANAGE  "; break;        
           case IBP_RENAME:         cmd = "IBP_RENAME        "; subcmd = "        "; break;
-          case IBP_PROXY_ALLOCATE: cmd = "IBP_PROXY_ALLOCATE"; subcmd = "        "; break;
+          case IBP_SPLIT_ALLOCATE: cmd = "IBP_SPLIT_ALLOCATE"; subcmd = "        "; break;
+          case IBP_ALIAS_ALLOCATE: cmd = "IBP_ALIAS_ALLOCATE"; subcmd = "        "; break;
           default : cmd = "UNKNOWN";
         }
 
@@ -65,7 +63,7 @@ void print_manage_history(Allocation_manage_ts_t *ts_list, int start)
         t2 = ts->expiration;
         ctime_r(&t2, print_time2); print_time2[strlen(print_time2)-1] = '\0';
         address2ipdecstr(hostip, ts->ts.host.ip, ts->ts.host.atype);
-        if ((ts->cmd == IBP_PROXY_ALLOCATE) || (ts->cmd == IBP_PROXY_MANAGE)) {
+        if ((ts->cmd == IBP_ALIAS_ALLOCATE) || (ts->cmd == IBP_ALIAS_MANAGE)) {
           printf("   " TT " * %s  * %s * " LU " * %s * %s * " LU " * " LU " * " TT " * %s\n", t, print_time, hostip, ts->id, cmd, subcmd, ts->reliability, ts->size, t2, print_time2);
         } else {
           printf("   " TT " * %s  * %s * " LU " * %s * %s * %s * " LU " * " TT " * %s\n", t, print_time, hostip, ts->id, cmd, subcmd, rel, ts->size, t2, print_time2);
@@ -99,7 +97,7 @@ void print_rw_history(Allocation_rw_ts_t *ts_list, int start)
 //*************************************************************************
 //*************************************************************************
 
-int main(int argc, const char **argv)
+int main(int argc, char **argv)
 {
   int bufsize = 1024*1024;
   char buffer[bufsize], *bstate;
@@ -204,6 +202,7 @@ int main(int argc, const char **argv)
   printf("Allocation summary\n");
   printf("-----------------------------------------\n");
   printf("ID: " LU "\n", a.id); 
+  printf("Master ID: " LU " (only used if split)\n", a.split_parent_id); 
   t = a.creation_ts.time;
   ctime_r(&t, print_time); print_time[strlen(print_time)-1] = '\0';
   address2ipdecstr(hostip, a.creation_ts.host.ip, a.creation_ts.host.atype);
@@ -218,7 +217,7 @@ int main(int argc, const char **argv)
      printf("Expiration: " TT " -- %s\n", t, print_time);
   }
 
-  printf("is_proxy: %d\n", a.is_proxy);
+  printf("is_alias: %d\n", a.is_alias);
   printf("Read cap: %s\n", a.caps[READ_CAP].v);
   printf("Write cap: %s\n", a.caps[WRITE_CAP].v);
   printf("Manage cap: %s\n", a.caps[MANAGE_CAP].v);
@@ -244,15 +243,15 @@ int main(int argc, const char **argv)
   printf("Read ref count: %u\n", a.read_refcount);
   printf("Write ref count: %u\n", a.write_refcount);
 
-  if (a.is_proxy) {
-     printf("Proxy offset: " LU "\n", a.proxy_offset);
-     printf("Proxy size: " LU "\n", a.proxy_size);
-     printf("Proxy ID: " LU "\n", a.proxy_id);
+  if (a.is_alias) {
+     printf("Alias offset: " LU "\n", a.alias_offset);
+     printf("Alias size: " LU "\n", a.alias_size);
+     printf("Alias ID: " LU "\n", a.alias_id);
 
   }
 
   printf("\n");
-  printf("Read history (slot=%d) (epoch, time, host, id, offset, size\n", h.read_slot);
+  printf("Read history (slot=%d) (epoch, time, host, id, offset, size)\n", h.read_slot);
   printf("---------------------------------------------\n");
   print_rw_history(h.read_ts, h.read_slot);
 
@@ -298,4 +297,3 @@ int main(int argc, const char **argv)
 
   return(0);
 }
-#endif

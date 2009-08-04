@@ -57,13 +57,13 @@ void migrate_allocation_v120(Allocation_v116_t *olda, Allocation_t *a)
   a->type = olda->type;
   a->reliability = olda->reliability;
   a->read_refcount = olda->read_refcount;
-  a->write_refcount = olda->write_refcount;
+  a->write_refcount = olda->write_refcount - 1;  //** The old alloc defaulted this to 1
   memcpy(a->caps[0].v, olda->caps[0].v, CAP_SIZE+1);
   memcpy(a->caps[1].v, olda->caps[1].v, CAP_SIZE+1);
   memcpy(a->caps[2].v, olda->caps[2].v, CAP_SIZE+1);
 
   //** Init the new fields as needed **
-  a->is_proxy = 0;   //** Technically don't need to to this cause of the memset but it's a reminder
+  a->is_alias = 0;   //** Technically don't need to to this cause of the memset but it's a reminder
 }
 
 //******************************************************************
@@ -133,7 +133,7 @@ int import_resource_v120(Resource_t *r, DB_env_t *dbenv, int remove_expired, int
 
    //*** Now we have to fill it ***
    r->used_space[0] = 0; r->used_space[1] = 0;
-   r->n_allocs = 0; r->n_proxy = 0;
+   r->n_allocs = 0; r->n_alias = 0;
 
    t = time(NULL);
    cnt = 0;
@@ -150,12 +150,10 @@ int import_resource_v120(Resource_t *r, DB_env_t *dbenv, int remove_expired, int
       migrate_allocation_v120(&olda, a);   //** Migrate the data
 
       id = a->id;
-      if ((a->expiration < t) && (remove_expired == 1)) {
+      if (((a->expiration < t) && (remove_expired == 1)) || ((a->read_refcount == 0) && (a->write_refcount == 0))) {
          log_printf(5, "import_resource_v120(rid=%s): Removing expired record with id: " LU "\n", r->name, id);
-         if (a->size > 0) {   //** Only works with IBP_BYTEARRAY allocations
-            if ((err = r->fs->remove(id)) != 0) {
-               log_printf(0, "import_resource_v120(rid=%s): Error Removing id " LU "  Error=%d\n", r->name, id, err);
-            }
+         if ((err = r->fs->remove(id)) != 0) {
+            log_printf(0, "import_resource_v120(rid=%s): Error Removing id " LU "  Error=%d\n", r->name, id, err);
          }
        
          ecnt++;

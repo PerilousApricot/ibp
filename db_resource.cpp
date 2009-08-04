@@ -339,7 +339,7 @@ int mount_db_generic(GKeyFile *kf, DB_env_t *env, DB_resource_t *dbres, int wipe
    dbres->env = env;
    if (env->dbenv == NULL) {  //** Got to make a local environment
       log_printf(10, "moount_db_generic:  Creating local DB environment. loc=%s\n", dbres->loc);
-      lenv = create_db_env(dbres->loc, env->max_size);
+      lenv = create_db_env(dbres->loc, env->max_size, wipe_clean);
       lenv->local = 1;
       dbres->env = lenv; 
    }
@@ -490,7 +490,7 @@ int umount_db(DB_resource_t *dbres)
 // create_db_env - Creates the DB environment
 //***************************************************************************
 
-DB_env_t *create_db_env(const char *loc, int db_mem)
+DB_env_t *create_db_env(const char *loc, int db_mem, int run_recover)
 {
    u_int32_t flags;
    DB_ENV *dbenv;
@@ -508,7 +508,13 @@ DB_env_t *create_db_env(const char *loc, int db_mem)
    if (strcmp(loc, "local") == 0) return(env);
 
    flags = DB_CREATE   | DB_INIT_LOCK | DB_INIT_LOG | DB_INIT_MPOOL | 
-           DB_INIT_TXN | DB_THREAD    | DB_RECOVER | DB_AUTO_COMMIT;
+           DB_INIT_TXN | DB_THREAD    | DB_AUTO_COMMIT;
+
+   switch (run_recover) {
+     case 0: flags = flags | DB_RECOVER; break;
+     case 1: flags = flags | DB_RECOVER;  break;
+     case 2: break;
+   }
 
    assert(db_env_create(&dbenv, 0) == 0);
    env->dbenv = dbenv;
@@ -795,7 +801,7 @@ int modify_alloc_db(DB_resource_t *dbr, Allocation_t *a)
 // _lookup_id_with_cap_db - Looks to see if the cap is stored
 //***************************************************************************
 
-int _lookup_id_with_cap_db(DB_resource_t *dbr, Cap_t *cap, int cap_type, osd_id_t *id, int *is_proxy)
+int _lookup_id_with_cap_db(DB_resource_t *dbr, Cap_t *cap, int cap_type, osd_id_t *id, int *is_alias)
 {
   DBT key, data;
   Allocation_t a;
@@ -820,7 +826,7 @@ int _lookup_id_with_cap_db(DB_resource_t *dbr, Cap_t *cap, int cap_type, osd_id_
 
   if (err == 0) {
      *id = a.id;
-     *is_proxy = a.is_proxy;
+     *is_alias = a.is_alias;
   }
 
   return(err);      
@@ -1001,7 +1007,7 @@ int db_iterator_next(DB_iterator_t *it, int direction, Allocation_t *a)
         key.data = &id;
         key.ulen = sizeof(id);
  
-        err = it->cursor->c_get(it->cursor, &key, &data, direction);  //** Read the 1st
+        err = it->cursor->get(it->cursor, &key, &data, direction);  //** Read the 1st
         if (err != 0) {
            log_printf(10, "db_iterator_next: key_index=%d err = %s\n", it->db_index, db_strerror(err));
         }
@@ -1013,7 +1019,7 @@ int db_iterator_next(DB_iterator_t *it, int direction, Allocation_t *a)
         key.data = cap.v;
         key.ulen = sizeof(Cap_t);
  
-        err = it->cursor->c_get(it->cursor, &key, &data, direction);  //** Read the 1st
+        err = it->cursor->get(it->cursor, &key, &data, direction);  //** Read the 1st
         if (err != 0) {
            log_printf(10, "db_iterator_next: key_index=%d err = %s\n", it->db_index, db_strerror(err));
            return(err);
@@ -1024,7 +1030,7 @@ int db_iterator_next(DB_iterator_t *it, int direction, Allocation_t *a)
         key.data = &tkey;
         key.ulen = sizeof(tkey);
 
-        err = it->cursor->c_get(it->cursor, &key, &data, direction);  //** Read the 1st
+        err = it->cursor->get(it->cursor, &key, &data, direction);  //** Read the 1st
         if (err != 0) {
            log_printf(10, "db_iterator_next: key_index=%d err = %s\n", it->db_index, db_strerror(err));
            return(err);
@@ -1098,7 +1104,7 @@ int set_expire_iterator(DB_iterator_t *dbi, time_t t, Allocation_t *a)
   data.ulen = sizeof(Allocation_t);
   data.data = a;
 
-  if ((err = dbi->cursor->get(dbi->cursor, &key, &data, DB_SET)) != 0) {
+  if ((err = dbi->cursor->get(dbi->cursor, &key, &data, DB_SET_RANGE)) != 0) {
      log_printf(5, "set_expire_iterator: Error with get!  time=" TT " * error=%d\n", t, err);
      return(err);
   }

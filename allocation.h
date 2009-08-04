@@ -84,14 +84,14 @@ typedef struct {  //** Manage ops
   short int cmd;
   short int subcmd;
   uint32_t expiration;    
-  uint64_t reliability;   //** This duals as the offset for IBP_PROXY_ALLOCATE/MANAGE calls
-  uint64_t size;          //** This duals as the proxy size for IBP_PROXY_ALLOCATE/MANAGE calls
-  osd_id_t id;    //** This is the proxy ID for a IBP_PROXY_ALLOCATE call
+  uint64_t reliability;   //** This duals as the offset for IBP_ALIAS_ALLOCATE/MANAGE calls
+  uint64_t size;          //** This duals as the alias size for IBP_ALIAS_ALLOCATE/MANAGE calls
+  osd_id_t id;    //** This is the alias ID for a IBP_ALIAS_ALLOCATE call
   Allocation_timestamp_t ts;
 } Allocation_manage_ts_t;
 
 typedef struct {  //** Allocation Timestamp information
-  osd_id_t id;    //** This is the proxy ID for a IBP_PROXY_ALLOCATE call
+  osd_id_t id;    //** This is the alias ID for a IBP_ALIAS_ALLOCATE call
   Allocation_manage_ts_t manage_ts[ALLOC_HISTORY];
   Allocation_rw_ts_t read_ts[ALLOC_HISTORY];
   Allocation_rw_ts_t write_ts[ALLOC_HISTORY];
@@ -108,19 +108,20 @@ typedef struct {   //** Timekey for expiration indices
 
 typedef struct {    // IBP Allocation
   osd_id_t id;
+  osd_id_t split_parent_id;   //** Non-zero if this allocation was split off an existing alloc
   uint64_t size;
   uint64_t max_size;
   uint64_t r_pos;
   uint64_t w_pos;
-  uint32_t is_proxy;
+  uint32_t is_alias;
   uint32_t expiration;
   int32_t  type; /* BYTE_ARRAY, QUEUE, etc */
   int32_t  reliability; /* SOFT/HARD */
   int32_t  read_refcount;
   int32_t  write_refcount;
-  uint64_t proxy_offset;
-  uint64_t proxy_size;
-  osd_id_t proxy_id;
+  uint64_t alias_offset;
+  uint64_t alias_size;
+  osd_id_t alias_id;
   Cap_t    caps[3];
   DB_timekey_t expirekey;
   DB_timekey_t softkey;

@@ -34,7 +34,7 @@ http://www.accre.vanderbilt.edu
 #include "allocation.h"
 #include "resource.h"
 #include <stdio.h>
-#include "ceph/common/Thread.h"
+
 #define CREATE_TEST  0
 #define REMOVE_TEST  1
 

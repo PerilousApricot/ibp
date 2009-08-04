@@ -46,6 +46,7 @@ typedef struct {
 
 int stack_size(Stack_t *);
 Stack_t *new_stack();
+void empty_stack(Stack_t *, int);
 void free_stack(Stack_t *, int);
 void *get_stack_ele_data(Stack_ele_t *ele);
 void set_stack_ele_data(Stack_ele_t *ele, void *data);

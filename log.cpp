@@ -33,13 +33,12 @@ http://www.accre.vanderbilt.edu
 #include "log.h"
 
 #ifndef _DISABLE_LOG
-FILE *_log_fd = stdout;
+FILE *_log_fd = NULL;
 int _log_level = 0;
 int _log_currsize = 0;
 int _log_maxsize = 100*1024*1024;
 pthread_mutex_t _log_lock = PTHREAD_MUTEX_INITIALIZER;
-char _log_fname[1024];
-
+char _log_fname[1024] = "stdout";
 
 void _open_log(const char *fname, int dolock) {
   if (dolock == 1) _lock_log(); 

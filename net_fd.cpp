@@ -233,7 +233,7 @@ long int fd_write(int fd, const void *buf, size_t count, Net_timeout_t tm)
   if (fd == -1) return(-1);   //** If closed return
 
   n = write(fd, buf, count);
-log_printf(15, "fd_write: fd=%d n=%ld errno=%d\n", fd, n, errno);
+//log_printf(15, "fd_write: fd=%d n=%ld errno=%d\n", fd, n, errno);
 
   if ((n==-1) && ((errno == EAGAIN) || (errno == EINTR))) n = 0;
 
@@ -244,7 +244,7 @@ log_printf(15, "fd_write: fd=%d n=%ld errno=%d\n", fd, n, errno);
      err = select(fd+1, NULL, &wfd, NULL, &tm);
      if (err > 0) {
         n = write(fd, buf, count);
-log_printf(15, "fd_write2: fd=%d n=%ld select=%d errno=%d\n", fd, n, err,errno);
+//log_printf(15, "fd_write2: fd=%d n=%ld select=%d errno=%d\n", fd, n, err,errno);
         if (n == 0) {
            n = -1;        //** Dead connection
         } else if ((n==-1) && ((errno == EAGAIN) || (errno == EINTR))) {
@@ -269,7 +269,7 @@ long int fd_read(int fd, void *buf, size_t count, Net_timeout_t tm)
   if (fd == -1) return(-1);   //** If closed return
 
   n = read(fd, buf, count);
-log_printf(15, "fd_read: fd=%d n=%ld errno=%d\n", fd, n, errno);
+//log_printf(15, "fd_read: fd=%d n=%ld errno=%d\n", fd, n, errno);
   if ((n==-1) && ((errno == EAGAIN) || (errno == EINTR))) n = 0;
 
   if (n == 0) {  //** Nothing written to let's try and wait
@@ -279,7 +279,7 @@ log_printf(15, "fd_read: fd=%d n=%ld errno=%d\n", fd, n, errno);
      err = select(fd+1, &rfd, NULL, NULL, &tm);
      if (err > 0) {
         n = read(fd, buf, count);
-log_printf(15, "fd_read2: fd=%d n=%ld select=%d errno=%d\n", fd, n, err,errno);
+//log_printf(15, "fd_read2: fd=%d n=%ld select=%d errno=%d\n", fd, n, err,errno);
         if (n == 0) {
            n = -1;        //** Dead connection
         } else if ((n==-1) && ((errno == EAGAIN) || (errno == EINTR))) {
@@ -295,7 +295,7 @@ log_printf(15, "fd_read2: fd=%d n=%ld select=%d errno=%d\n", fd, n, err,errno);
 // fd_connect - Creates a connection to a remote host
 //*********************************************************************
 
-int fd_connect(int *fd, char *hostname, int port, int tcpsize, Net_timeout_t timeout)
+int fd_connect(int *fd, const char *hostname, int port, int tcpsize, Net_timeout_t timeout)
 {
    struct sockaddr_in addr;
    char in_addr[6];
@@ -307,11 +307,15 @@ int fd_connect(int *fd, char *hostname, int port, int tcpsize, Net_timeout_t tim
    log_printf(15, "fd_connect: Trying to make connection to Hostname: %s  Port: %d\n", hostname, port);
 
    *fd = -1;
+   if (hostname == NULL) {
+      log_printf(15, "fd_connect: lookup_host failed.  Missing hostname!  Port: %d\n",port);
+      return(1);
+   }
 
    // Get ip address
    if (lookup_host(hostname, in_addr) != 0) {
       log_printf(15, "fd_connect: lookup_host failed.  Hostname: %s  Port: %d\n", hostname, port);
-      return(1);;
+      return(1);
    }
    
    // get the socket

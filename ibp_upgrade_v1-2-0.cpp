@@ -43,7 +43,7 @@ http://www.accre.vanderbilt.edu
 #include "security_log.h"
 #include "dns_cache.h"
 #include "lock_alloc.h"
-#include "ceph/config.h"  //This is from ceph
+#include "config.h"  //This is from ceph
 
 int upgrade_resource_v120(Resource_t *res, GKeyFile *keyfile, char *group, DB_env_t *dbenv);
 
@@ -89,9 +89,11 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
 
   // *** Initialize the data structure to default values ***
   server = &(cfg->server);
-  assert((server->hostname = (char *)malloc(512)) != NULL);  server->hostname[511] = '\0';
-  gethostname(server->hostname, 511);
-  server->port = IBP_PORT;
+server->iface = NULL;
+server->n_iface = 0;
+//  assert((server->hostname = (char *)malloc(512)) != NULL);  server->hostname[511] = '\0';
+//  gethostname(server->hostname, 511);
+//  server->port = IBP_PORT;
   server->max_threads = 64;
   server->max_pending = 16;
   server->min_idle = 60;
@@ -111,10 +113,10 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
   cfg->force_resource_rebuild = 0;
 
   // *** Parse the Server settings ***
-  str = g_key_file_get_string(keyfile, "server", "address", NULL);
-  if (str != NULL) { free(server->hostname); server->hostname = str; }
-  val = g_key_file_get_integer(keyfile, "server", "port", NULL);
-  if (val > 0) server->port = val;
+//  str = g_key_file_get_string(keyfile, "server", "address", NULL);
+//  if (str != NULL) { free(server->hostname); server->hostname = str; }
+//  val = g_key_file_get_integer(keyfile, "server", "port", NULL);
+//  if (val > 0) server->port = val;
   val = g_key_file_get_integer(keyfile, "server", "threads", NULL);
   if (val > 0) server->max_threads = val;
   val = g_key_file_get_integer(keyfile, "server", "max_pending", NULL);
@@ -149,7 +151,7 @@ int parse_config(GKeyFile *keyfile, Config_t *cfg) {
   set_log_maxsize(cfg->server.log_maxsize);
 
   // *** Now iterate through each resource which is assumed to be all groups beginning with "resource" ***      
-  cfg->dbenv = create_db_env(cfg->dbenv_loc, cfg->db_mem);
+  cfg->dbenv = create_db_env(cfg->dbenv_loc, cfg->db_mem, cfg->force_resource_rebuild);
   gsize ngroups, i;
   char **group = g_key_file_get_groups(keyfile, &ngroups);
   cfg->n_resources = 0;

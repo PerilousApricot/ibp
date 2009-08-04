@@ -174,7 +174,7 @@ void print_uptime(char *str, int n)
    d = dt % 3600; min = d / 60;
    sec = d - min * 60;
 
-   snprintf(up_str, sizeof(up_str), "%d:%d:%d:%d", days, hours, min, sec);
+   snprintf(up_str, sizeof(up_str), "%d:%02d:%02d:%02d", days, hours, min, sec);
 
    snprintf(str, n, "Depot start time: %s\nUptime(d:h:m:s): %s\n", time_str, up_str);
   
@@ -188,13 +188,20 @@ void print_uptime(char *str, int n)
 void print_config(FILE *fd, Config_t *cfg) {
   Server_t *server;
   int d;
-
+  interface_t *iface;
   server = &(cfg->server);
 
   //Print the server settings first
   fprintf(fd, "[server]\n");
-  fprintf(fd, "address = %s\n", server->hostname);
-  fprintf(fd, "port = %d\n", server->port);
+//  fprintf(fd, "address = %s\n", server->hostname);
+//  fprintf(fd, "port = %d\n", server->port);
+  fprintf(fd, "interfaces=");
+  for (d=0; d<server->n_iface; d++) {
+      iface = &(server->iface[d]);
+      fprintf(fd, "%s:%d;", iface->hostname, iface->port);
+  }
+  fprintf(fd, "\n");
+
   fprintf(fd, "threads = %d\n", server->max_threads);
   fprintf(fd, "max_pending = %d\n", server->max_pending);
 //  fprintf(fd, "max_connections = %d\n", server->max_connections);
@@ -216,6 +223,9 @@ void print_config(FILE *fd, Config_t *cfg) {
   fprintf(fd, "activity_file = %s\n", server->alog_name);
   d = server->alog_max_size / 1024 / 1024;
   fprintf(fd, "activity_maxsize = %d\n", server->alog_max_size);
+  fprintf(fd, "activity_max_history = %d\n", server->alog_max_history);
+  fprintf(fd, "activity_host = %s\n", server->alog_host);
+  fprintf(fd, "activity_port = %d\n", server->alog_port);
   fprintf(fd, "\n");
   fprintf(fd, "force_resource_rebuild = %d\n", cfg->force_resource_rebuild);
   fprintf(fd, "truncate_duration = %d\n", cfg->truncate_expiration);
@@ -700,6 +710,7 @@ void server_loop(Config_t *config)
   NetStream_t *ns, *bns;
   time_t tt;
   time_t print_time;
+  int i;
   char current_time[128];
 
   print_time = time(NULL);
@@ -714,10 +725,12 @@ void server_loop(Config_t *config)
   if (network == NULL) return;
   global_network = network;
 
-  bns = new_netstream();
-  ns_config_sock(bns, -1, 0);
-  if (bind_server_port(network, bns, config->server.hostname, config->server.port, config->server.max_pending) != 0) {
-     shutdown_now =1;  //** Trigger a shutdown
+  for (i=0; i<config->server.n_iface; i++) {
+     bns = new_netstream();
+     ns_config_sock(bns, -1, 0);
+     if (bind_server_port(network, bns, config->server.iface[i].hostname, config->server.iface[i].port, config->server.max_pending) != 0) {
+        shutdown_now =1;  //** Trigger a shutdown
+     }
   }
 
 //  if ((tc = create_task_coord()) == NULL) goto ns_bail;
@@ -759,7 +772,7 @@ void server_loop(Config_t *config)
 
   //*** Shutdown the networking ***
   network_destroy(network);
-  destroy_netstream(bns);
+//  destroy_netstream(bns);
   
 //  if ((tc != NULL) free_task_coord(tc);
   

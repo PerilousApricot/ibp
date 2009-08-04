@@ -199,7 +199,7 @@ void _ns_init(NetStream_t *ns, int incid)
   ns->sock_status = NULL;
   ns->set_peer = NULL;
   ns->connect = NULL;
-  
+  ns->nm = NULL;
 
   ns->last_read = time(NULL);
   ns->last_write = time(NULL);
@@ -322,7 +322,7 @@ void *monitor_thread(void *data)
 
          //** Sleep until my connection is accepted
          pthread_mutex_lock(&(nm->lock)); 
-         if (nm->is_pending == 1) {
+         if ((nm->is_pending == 1) && (nm->shutdown_request == 0)) {
             pthread_cond_wait(&(nm->cond), &(nm->lock));
          }
          pthread_mutex_unlock(&(nm->lock));          
@@ -438,6 +438,7 @@ Network_t *network_init()
   net->used_ports = 0;
   net->trigger = 0;
   net->accept_pending = 0;
+  net->monitor_index = 0;
   pthread_mutex_init(&(net->ns_lock), NULL);
   pthread_mutex_unlock(&(net->ns_lock));
   pthread_cond_init(&(net->cond), NULL);
@@ -887,21 +888,25 @@ int readline_netstream(NetStream_t *ns, char *buffer, int bsize, Net_timeout_t t
 
 int accept_pending_connection(Network_t *net, NetStream_t *ns)
 {
-   int i, j, err;
+   int i, j, k, err;
    ns_monitor_t *nm = NULL;
 
    err = 0;
    //** Find the port
    j = -1;
+   k = net->monitor_index % net->used_ports;   
    for (i=0; i<net->used_ports; i++) {
-      nm = &(net->nm[i]);
+      k = (i + net->monitor_index) % net->used_ports;
+      nm = &(net->nm[k]);
       pthread_mutex_lock(&(nm->lock));
       if (nm->is_pending == 1) {   //** Found a slot
-         j = i; 
+         j = k; 
          break;  
       }
       pthread_mutex_unlock(&(nm->lock));
    }
+
+   net->monitor_index = (k + 1) % net->used_ports;
 
    //** Check if there is nothing to do.
    if (j == -1) {   
@@ -909,6 +914,8 @@ int accept_pending_connection(Network_t *net, NetStream_t *ns)
    }
 
    ns_clone(ns, nm->ns);  //** Clone the settings
+   ns->nm = nm;           //** Specify the bind accepted
+
    ns->sock = nm->ns->accept(nm->ns->sock);   //** Accept the connection
    if (ns->sock == NULL) err = 1;
 
@@ -945,11 +952,13 @@ log_printf(15, "wait_for_connection: max_wait=%d starttime=" TT " endtime=" TT "
 log_printf(15, "wait_for_connection: accept_pending=%d trigger=%d\n", net->accept_pending, net->trigger);
  
   while ((end_time > time(NULL)) && (net->accept_pending == 0) && (net->trigger == 0)) {
-    log_printf(15, "wait_for_connection: accept_pending=%d trigger=%d time=" TT "\n", net->accept_pending, net->trigger, time(NULL));
+//    log_printf(15, "wait_for_connection: accept_pending=%d trigger=%d time=" TT "\n", net->accept_pending, net->trigger, time(NULL));
     t.tv_sec = time(NULL) + 1;    //wait for at least a second
     t.tv_nsec = 0;
     pthread_cond_timedwait(&(net->cond), &(net->ns_lock), &t);
   }   
+
+  log_printf(15, "wait_for_connection: exiting loop accept_pending=%d trigger=%d time=" TT "\n", net->accept_pending, net->trigger, time(NULL));
 
   net->trigger = 0;  //** Clear the trigger if it was set
   n = net->accept_pending;

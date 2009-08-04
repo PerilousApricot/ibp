@@ -48,12 +48,19 @@
 # define   IBP_CT_COPY           11
 # define   IBP_NFU               12
 # define   IBP_WRITE		 13
-# define   IBP_PROXY_ALLOCATE    14
-# define   IBP_PROXY_MANAGE      15
+# define   IBP_ALIAS_ALLOCATE    14
+# define   IBP_ALIAS_MANAGE      15
 # define   IBP_RENAME            16
 # define   IBP_PHOEBUS_SEND      17
+# define   IBP_SPLIT_ALLOCATE    18
+# define   IBP_MERGE_ALLOCATE    19
+# define   IBP_PUSH              20
+# define   IBP_PULL              21
 
-# define   IBP_MAX_NUM_CMDS      17
+# define   IBP_MAX_NUM_CMDS      21
+
+# define   IBP_TCP          1
+# define  IBP_PHOEBUS      2
 
 # define   IBP_PROBE       40
 # define   IBP_INCR        41

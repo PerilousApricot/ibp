@@ -25,48 +25,14 @@ Advanced Computing Center for Research and Education
 230 Appleton Place
 Nashville, TN 37203
 http://www.accre.vanderbilt.edu
-*/ 
+*/
 
-//******************************************************************
-//******************************************************************
+#include "envelope.h"
+#include "network.h"
 
-#ifndef _IBP_ALLOCATION_V116_H_
-#define _IBP_ALLOCATION_V116_H_
+int envelope_send(NetStream_t *ns, envelope_t *env);
+int envelope_recv(NetStream_t *ns, envelope_t *env);
+int envelope_simple_send(NetStream_t *ns, uint32_t cmd);
+int envelope_simple_recv(NetStream_t *ns, uint32_t *cmd);
 
-#include <time.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <allocation.h>
-
-//#define CAP_SIZE 32
-//#define CAP_BITS CAP_SIZE*6
-
-//#define READ_CAP   0
-//#define WRITE_CAP  1
-//#define MANAGE_CAP 2
-
-//#define ALLOC_HEADER 4096
-
-//#define ALLOC_HARD 0
-//#define ALLOC_SOFT 1
-
-//typedef struct {
-//    char v[CAP_SIZE+1];
-//} Cap_t;
-
-typedef struct {    // IBP Allocation
-  uint32_t   expiration;
-  osd_id_t id;
-  uint64_t size;
-  uint64_t max_size;
-  uint64_t r_pos;
-  uint64_t w_pos;
-  int32_t  type; /* BYTE_ARRAY, QUEUE, etc */
-  int32_t  reliability; /* SOFT/HARD */
-  int32_t  read_refcount;
-  int32_t  write_refcount;
-  Cap_t    caps[3];
-} Allocation_v116_t;
-
-#endif
 

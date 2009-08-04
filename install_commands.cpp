@@ -42,6 +42,8 @@ void install_commands(GKeyFile *kf) {
 
   //** Default commands **
   add_command(IBP_ALLOCATE, "ibp_allocate", kf, NULL, NULL, NULL, NULL, read_allocate, handle_allocate);
+  add_command(IBP_SPLIT_ALLOCATE, "ibp_split_allocate", kf, NULL, NULL, NULL, NULL, read_allocate, handle_allocate);
+  add_command(IBP_MERGE_ALLOCATE, "ibp_merge_allocate", kf, NULL, NULL, NULL, NULL, read_merge_allocate, handle_merge);
   add_command(IBP_STATUS, "ibp_status", kf, NULL, NULL, NULL, NULL, read_status, handle_status);
   add_command(IBP_MANAGE, "ibp_manage", kf, NULL, NULL, NULL, NULL, read_manage, handle_manage);
   add_command(IBP_WRITE, "ibp_write", kf, NULL, NULL, NULL, NULL, read_write, handle_write);
@@ -50,8 +52,10 @@ void install_commands(GKeyFile *kf) {
   add_command(IBP_SEND, "ibp_send", kf, NULL, NULL, NULL, NULL, read_read, handle_copy);
   add_command(IBP_PHOEBUS_SEND, "ibp_phoebus_send", kf, phoebus_load_config, phoebus_init, phoebus_destroy, phoebus_print, read_read, handle_copy);
   add_command(IBP_RENAME, "ibp_rename", kf, NULL, NULL, NULL, NULL, read_rename, handle_rename);
-  add_command(IBP_PROXY_ALLOCATE, "ibp_proxy_allocate", kf, NULL, NULL, NULL, NULL, read_proxy_allocate, handle_proxy_allocate);
-  add_command(IBP_PROXY_MANAGE, "ibp_proxy_manage", kf, NULL, NULL, NULL, NULL, read_manage, handle_manage);
+  add_command(IBP_ALIAS_ALLOCATE, "ibp_alias_allocate", kf, NULL, NULL, NULL, NULL, read_alias_allocate, handle_alias_allocate);
+  add_command(IBP_ALIAS_MANAGE, "ibp_alias_manage", kf, NULL, NULL, NULL, NULL, read_manage, handle_manage);
+  add_command(IBP_PUSH, "ibp_push", kf, NULL, NULL, NULL, NULL, read_read, handle_copy);
+  add_command(IBP_PULL, "ibp_pull", kf, NULL, NULL, NULL, NULL, read_read, handle_copy);
 
   //*** Extra commands go below ****
   add_command(INTERNAL_GET_ALLOC, "internal_get_alloc", kf, NULL, NULL, NULL, NULL, read_internal_get_alloc, handle_internal_get_alloc);

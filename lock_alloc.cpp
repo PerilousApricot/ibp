@@ -68,6 +68,46 @@ void unlock_osd_id(osd_id_t id)
 }
 
 //******************************************************************
+//  lock_osd_id_pair - Locks a pair of IDs.  Blocks until a lock can be acquired
+//******************************************************************
+
+void lock_osd_id_pair(osd_id_t id1, osd_id_t id2)
+{
+   int slot1 = id_slot(id1);
+   int slot2 = id_slot(id2);
+
+   if (slot1 == slot2) {
+      pthread_mutex_lock(&(lock_table[slot1]));
+   } else if (slot1 > slot2) {
+      pthread_mutex_lock(&(lock_table[slot1]));
+      pthread_mutex_lock(&(lock_table[slot2]));
+   } else {
+      pthread_mutex_lock(&(lock_table[slot2]));
+      pthread_mutex_lock(&(lock_table[slot1]));
+   }
+}
+
+//******************************************************************
+//  unlock_osd_id_pair - Unlocks the ID pair.
+//******************************************************************
+
+void unlock_osd_id_pair(osd_id_t id1, osd_id_t id2)
+{
+   int slot1 = id_slot(id1);
+   int slot2 = id_slot(id2);
+
+   if (slot1 == slot2) {
+      pthread_mutex_unlock(&(lock_table[slot1]));
+   } else if (slot1 > slot2) {
+      pthread_mutex_unlock(&(lock_table[slot2]));
+      pthread_mutex_unlock(&(lock_table[slot1]));
+   } else {
+      pthread_mutex_unlock(&(lock_table[slot1]));
+      pthread_mutex_unlock(&(lock_table[slot2]));
+   }
+}
+
+//******************************************************************
 //  lock_alloc_init - Initializes the allocation locking routines
 //******************************************************************
 

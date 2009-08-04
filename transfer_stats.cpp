@@ -58,7 +58,7 @@ void init_stats(int n)
   assert((stats.table = (Transfer_stat_t *)malloc(sizeof(Transfer_stat_t)*n)) != NULL);
   
   pthread_mutex_init(&(stats.lock), NULL);
-  stats.host = strdup(global_config->server.hostname);
+  stats.host = strdup(global_config->server.iface[0].hostname);
   stats.pos = 0;
   stats.size = n;
   stats.read_bytes = 0;

@@ -29,16 +29,15 @@ http://www.accre.vanderbilt.edu
 
 #include "allocation.h"
 #include "resource.h"
-#include "ceph/config.h"
 #include <stdio.h>
 
 //***********************************************************************************
 //***********************************************************************************
 //***********************************************************************************
 
-int main(int argc, const char **argv)
+int main(int argc, char **argv)
 {
-  vector<const char*> args;
+  vector<char*> args;
   Resource_t r;
   GKeyFile *kfd;
   GKeyFileFlags flags;
@@ -65,7 +64,7 @@ int main(int argc, const char **argv)
    g_key_file_load_from_file(kfd, args[0], flags, NULL); 
 
    printf("Mounting resource\n");
-   dbenv = create_db_env("db/dbenv",8192);
+   dbenv = create_db_env("db/dbenv");
    mount_resource(&r, kfd, args[1], dbenv, 0);
 
    printf("\nPrinting resource information\n");
