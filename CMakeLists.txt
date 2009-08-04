@@ -57,10 +57,3 @@ TARGET_LINK_LIBRARIES( date_spacefree ${LIBS})
 TARGET_LINK_LIBRARIES( expire_list ${LIBS})
 TARGET_LINK_LIBRARIES( print_alog ${LIBS})
 
-
-
-
-#TARGET_LINK_LIBRARIES( ibp_server2 ${LIBS})
-
-#target_link_libraries( ibpd bdb )
-#SET_TARGET_PROPERTIES(ibpd PROPERTIES LINKER_LANGUAGE)
