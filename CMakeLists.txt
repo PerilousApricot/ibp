@@ -8,9 +8,11 @@ set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 find_package(BerkeleyDB REQUIRED)
 find_package(GLIB2 REQUIRED)
 find_package(OpenSSL REQUIRED)
-include_directories(${BDB_INCLUDE_DIR} ${GLIB2_INCLUDE_DIRS} ${OPENSSL_INCLUDE_DIR} "ceph/eobfs" "ceph")
+find_package(Protobuf REQUIRED)
+include_directories(${BDB_INCLUDE_DIR} ${GLIB2_INCLUDE_DIRS}
+${OPENSSL_INCLUDE_DIR} "ceph/eobfs" "ceph" ${PROTOBUF_INCLUDE_DIR})
 SET(LIBS ${LIBS} ${BDB_LIBRARIES} ${GLIB2_LIBRARIES} ${OPENSSL_LIBRARIES}
-${CRYPTO_LIBRARIES}
+${CRYPTO_LIBRARIES} ${PROTOBUF_LIBRARY}
 pthread)
 
 # config options
