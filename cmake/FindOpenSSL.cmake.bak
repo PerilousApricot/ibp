@@ -1,0 +1,82 @@
+#------------------------------------------------------------------------------
+# Desc:
+# Tabs: 3
+#
+# Copyright (c) 2007 Novell, Inc. All Rights Reserved.
+#
+# This program and the accompanying materials are made available 
+# under the terms of the Eclipse Public License v1.0 which
+# accompanies this distribution, and is available at 
+# http://www.eclipse.org/legal/epl-v10.html
+#
+# To contact Novell about this file by physical or electronic mail, 
+# you may find current contact information at www.novell.com.
+#
+# $Id$
+#
+# Author: Andrew Hodgkinson <ahodgkinson@novell.com>
+#------------------------------------------------------------------------------
+
+# Include the local modules directory
+
+set( CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/CMakeModules")
+message("called")
+# Locate OpenSSL files
+
+if( NOT OPENSSL_FOUND)
+
+	find_path( OPENSSL_INCLUDE_DIR ssl.h 
+		PATHS /usr/include
+				/usr/local/include
+				$ENV{HOME}/lib
+		PATH_SUFFIXES openssl
+		NO_DEFAULT_PATH
+	)
+	MARK_AS_ADVANCED( OPENSSL_INCLUDE_DIR)
+		
+	find_library( SSL_LIBRARY 
+		NAMES ssl.0.9.8 ssl.0.9.7 ssl 
+		PATHS /usr/lib
+				/usr/local/lib
+				$ENV{HOME}/lib
+		NO_DEFAULT_PATH
+	)
+	MARK_AS_ADVANCED( SSL_LIBRARY)
+		
+	find_library( CRYPTO_LIBRARY 
+		NAMES crypto.0.9.8 crypto.0.9.7 crypto 
+		PATHS /usr/lib
+				/usr/local/lib
+				$ENV{HOME}/lib
+		NO_DEFAULT_PATH
+	)
+	MARK_AS_ADVANCED( CRYPTO_LIBRARY)
+	
+	if( OPENSSL_INCLUDE_DIR AND SSL_LIBRARY AND CRYPTO_LIBRARY)
+		set( OPENSSL_FOUND TRUE)
+		set( OPENSSL_INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR})
+		set( OPENSSL_LIBRARIES ${SSL_LIBRARY} ${CRYPTO_LIBRARY})
+		
+		if( SSL_LIBRARY MATCHES ".*0.9.7.*")
+			set( OPENSSL_VERSION "0.9.7")
+		else( SSL_LIBRARY MATCHES ".*0.9.7.*")
+			set( OPENSSL_VERSION "unknown")
+		endif( SSL_LIBRARY MATCHES ".*0.9.7.*")
+	endif( OPENSSL_INCLUDE_DIR AND SSL_LIBRARY AND CRYPTO_LIBRARY)
+	
+	if( OPENSSL_FOUND)
+		if( NOT OPENSSL_FIND_QUIETLY)
+			message( STATUS "Found OpenSSL libraries: ${OPENSSL_LIBRARIES}")
+			message( STATUS "Found OpenSSL inc dirs: ${OPENSSL_INCLUDE_DIRS}")
+		endif( NOT OPENSSL_FIND_QUIETLY)
+	else( OPENSSL_FOUND)
+		if( OPENSSL_FIND_REQUIRED)
+			message( FATAL_ERROR "Could not find OpenSSL")
+		else( OPENSSL_FIND_REQUIRED)
+			if( NOT OPENSSL_FIND_QUIETLY)
+				message( STATUS "Could not find OpenSSL")
+			endif( NOT OPENSSL_FIND_QUIETLY)
+		endif( OPENSSL_FIND_REQUIRED)
+	endif( OPENSSL_FOUND)
+
+endif( NOT OPENSSL_FOUND)
