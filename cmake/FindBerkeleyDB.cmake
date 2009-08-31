@@ -9,7 +9,9 @@
 # also defined, but not for general use are
 # BDB_LIBRARY, where to find the BerkeleyDB library.
  
-find_path(BDB_INCLUDE_DIR db_cxx.h NO_DEFAULT_PATH PATHS
+find_path(BDB_INCLUDE_DIR db_cxx.h NO_DEFAULT_PATH HINTS
+    $ENV{HOME}/include
+    PATHS
     /usr/local/BerkeleyDB.4.7/include
     /opt/local/include/db47
     /opt/local/include/db46 # introduced key_exists
@@ -17,18 +19,18 @@ find_path(BDB_INCLUDE_DIR db_cxx.h NO_DEFAULT_PATH PATHS
     /usr/local/include
     /usr/include/db4
     /usr/include
-    $ENV{HOME}/include
     )
  
 set(BDB_NAMES ${BDB_NAMES} db_cxx)
-find_library(BDB_LIBRARY NAMES ${BDB_NAMES} NO_DEFAULT_PATH PATHS
+find_library(BDB_LIBRARY NAMES ${BDB_NAMES} NO_DEFAULT_PATH HINTS
+    $ENV{HOME}/lib
+    PATHS
     /usr/local/BerkeleyDB.4.7/lib
     /opt/local/lib/db47
     /opt/local/lib/db46 # ditto
     /usr/local/lib/db4
     /usr/local/lib
     /usr/lib
-    $ENV{HOME}/lib
     )
  
 if (BDB_LIBRARY AND BDB_INCLUDE_DIR)
